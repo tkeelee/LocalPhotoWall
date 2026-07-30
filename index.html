@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>照片地图 · 时空轨迹</title>
+<link rel="stylesheet" href="vendor/leaflet.css">
+<style>
+  :root{
+    --bg:#0e1116;
+    --panel:rgba(255,255,255,.92);
+    --line:rgba(16,22,34,.10);
+    --text:#141a22;
+    --sub:#66707e;
+    --brand:#2b6cff;
+    --brand-2:#0f47c9;
+    --danger:#e5484d;
+    --r:14px;
+    --shadow:0 8px 28px rgba(12,18,30,.18), 0 2px 6px rgba(12,18,30,.10);
+    --safe-b:env(safe-area-inset-bottom,0px);
+    --safe-r:env(safe-area-inset-right,0px);
+    --safe-l:env(safe-area-inset-left,0px);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;padding:0;overflow:hidden;background:var(--bg)}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+    color:var(--text);-webkit-font-smoothing:antialiased;
+  }
+  #map{position:absolute;inset:0;width:100%;height:100%;background:#e9edf2}
+  .leaflet-container{font-family:inherit;background:#e9edf2}
+  .leaflet-control-attribution{
+    font-size:10px;background:rgba(255,255,255,.7);color:#7b8593;
+    padding:1px 6px;border-radius:6px 0 0 0;
+  }
+  .leaflet-control-attribution a{color:#7b8593;text-decoration:none}
+
+  button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+  .glass{
+    background:var(--panel);
+    backdrop-filter:saturate(180%) blur(18px);
+    -webkit-backdrop-filter:saturate(180%) blur(18px);
+    box-shadow:var(--shadow);
+    border:1px solid rgba(255,255,255,.6);
+  }
+  .hidden{display:none !important}
+
+  /* ---------- 右下控件栈 ---------- */
+  #ctrlRight{
+    position:absolute;z-index:600;
+    right:calc(14px + var(--safe-r));
+    bottom:calc(24px + var(--safe-b));
+    display:flex;flex-direction:column;gap:10px;align-items:center;
+  }
+  .ctrl-group{display:flex;flex-direction:column;border-radius:var(--r);overflow:hidden}
+  .ctrl-btn{
+    width:44px;height:44px;display:flex;align-items:center;justify-content:center;
+    color:#20293a;transition:background .15s ease,color .15s ease;position:relative;
+  }
+  .ctrl-btn:hover{background:rgba(43,108,255,.10);color:var(--brand)}
+  .ctrl-btn:active{background:rgba(43,108,255,.18)}
+  .ctrl-group .ctrl-btn + .ctrl-btn{border-top:1px solid var(--line)}
+  .ctrl-btn.on{background:var(--brand);color:#fff}
+  .ctrl-btn.on:hover{background:var(--brand-2)}
+  .ctrl-btn svg{width:21px;height:21px;display:block}
+  .ctrl-btn .badge{
+    position:absolute;bottom:3px;right:4px;font-size:9px;font-weight:700;
+    line-height:1;color:currentColor;opacity:.85;
+  }
+
+  /* ---------- 左下功能区 ---------- */
+  #panelLeft{
+    position:absolute;z-index:600;
+    left:calc(14px + var(--safe-l));
+    bottom:calc(24px + var(--safe-b));
+    display:flex;flex-direction:column;gap:10px;align-items:flex-start;
+  }
+  .dock{display:flex;flex-direction:column;border-radius:var(--r);overflow:hidden;padding:0}
+  .dock-btn{
+    display:flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;border-radius:0;
+    color:#20293a;transition:background .15s,color .15s;position:relative;
+  }
+  .dock-btn + .dock-btn{border-top:1px solid var(--line)}
+  .dock-btn.icon-only{width:44px;height:44px;padding:0}
+  .dock-btn svg{width:20px;height:20px;flex:none;display:block}
+  .dock-btn:hover{background:rgba(43,108,255,.10);color:var(--brand)}
+  .dock-btn:active{background:rgba(43,108,255,.18)}
+  .dock-btn.primary{background:var(--brand);color:#fff}
+  .dock-btn.primary:hover{background:var(--brand-2);color:#fff}
+  .dock-btn.dirty::after{
+    content:"";position:absolute;top:5px;right:5px;width:7px;height:7px;border-radius:50%;background:#ff9500;
+    box-shadow:0 0 0 3px rgba(255,149,0,.22);
+  }
+
+  #statBar{
+    display:flex;align-items:center;gap:10px;padding:7px 13px;border-radius:11px;
+    font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums;
+  }
+  #statBar b{color:var(--text);font-weight:700;font-size:13px}
+  #statBar .dot{width:5px;height:5px;border-radius:50%;background:#34c759}
+
+  #importMenu{
+    position:absolute;z-index:650;left:calc(14px + var(--safe-l));
+    bottom:calc(78px + var(--safe-b));
+    padding:6px;border-radius:var(--r);min-width:210px;
+    animation:pop .18s cubic-bezier(.2,.9,.3,1.2);
+  }
+  @keyframes pop{from{opacity:0;transform:translateY(8px) scale(.96)}to{opacity:1;transform:none}}
+  .menu-item{display:flex;align-items:flex-start;gap:10px;width:100%;padding:9px 11px;border-radius:9px;text-align:left}
+  .menu-item:hover{background:rgba(43,108,255,.09)}
+  .menu-item svg{width:18px;height:18px;margin-top:1px;color:var(--brand);flex:none}
+  .menu-item .t{font-size:13.5px;font-weight:600;display:block}
+  .menu-item .d{font-size:11.5px;color:var(--sub);margin-top:2px;line-height:1.35;display:block}
+
+  /* ---------- 照片点位标记 ---------- */
+  .leaflet-marker-icon.pm-icon{background:none;border:none;width:0 !important;height:0 !important}
+  .pm{
+    position:absolute;left:0;bottom:0;
+    transform:translate(-50%,0) scale(var(--s,1));
+    transform-origin:bottom center;
+    transition:transform .3s cubic-bezier(.25,.9,.3,1.1);
+    will-change:transform;cursor:pointer;
+  }
+  .pm-wobble{transform-origin:bottom center;display:block}
+  .pm.shake .pm-wobble{animation:wob .55s cubic-bezier(.36,.07,.19,.97) both}
+  @keyframes wob{
+    0%{transform:rotate(0) translateY(0)}
+    18%{transform:rotate(-5deg) translateY(-3px)}
+    38%{transform:rotate(4.5deg) translateY(1px)}
+    58%{transform:rotate(-3deg) translateY(-2px)}
+    78%{transform:rotate(2deg) translateY(0)}
+    100%{transform:rotate(0) translateY(0)}
+  }
+  .pm-box{
+    width:72px;height:72px;margin-bottom:8px;border-radius:9px;overflow:hidden;background:#fff;
+    border:2.5px solid #fff;
+    box-shadow:0 4px 14px rgba(8,14,26,.32),0 0 0 1px rgba(8,14,26,.10);
+    position:relative;
+  }
+  .pm-box img{width:100%;height:100%;object-fit:cover;display:block}
+  .pm-box::after{
+    content:"";position:absolute;left:50%;bottom:-9px;transform:translateX(-50%);
+    width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;
+    border-top:8px solid #fff;filter:drop-shadow(0 2px 2px rgba(8,14,26,.22));
+  }
+  .pm.active .pm-box{border-color:#ffd24a;box-shadow:0 6px 22px rgba(8,14,26,.42),0 0 0 3px rgba(255,210,74,.55)}
+  .pm.active .pm-box::after{border-top-color:#ffd24a}
+  .pm.no-time .pm-box{border-color:#e9edf3}
+
+  /* ---------- 大图查看器 ---------- */
+  #viewer{
+    position:absolute;z-index:700;left:50%;top:50%;transform:translate(-50%,-50%);
+    display:flex;flex-direction:column;align-items:center;pointer-events:none;
+    animation:vin .2s cubic-bezier(.2,.9,.3,1.15);
+  }
+  @keyframes vin{from{opacity:0;transform:translate(-50%,-48%) scale(.94)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+  #viewer .frame{
+    padding:6px;border-radius:12px;background:rgba(255,255,255,.96);
+    box-shadow:0 24px 70px rgba(6,10,20,.5),0 3px 10px rgba(6,10,20,.3);
+    max-width:64vw;max-height:66vh;overflow:hidden;line-height:0;
+  }
+  #viewerImg{display:block;max-width:100%;max-height:calc(66vh - 12px);border-radius:7px;object-fit:contain}
+  #viewerMeta{
+    margin-top:9px;padding:6px 13px;border-radius:9px;background:rgba(16,20,28,.82);
+    color:#fff;font-size:12px;line-height:1.5;text-align:center;max-width:62vw;
+    backdrop-filter:blur(10px);
+  }
+  #viewerMeta .n{font-weight:600;font-size:12.5px}
+  #viewerMeta .s{opacity:.72;font-size:11px;margin-top:1px;font-variant-numeric:tabular-nums}
+  #viewerMeta .warn{color:#ffcf6b;font-size:11px;margin-top:2px}
+
+  /* ---------- 弹窗 ---------- */
+  .mask{position:absolute;inset:0;z-index:800;background:rgba(9,13,20,.42);backdrop-filter:blur(3px);
+    display:flex;align-items:center;justify-content:center;padding:20px}
+  .modal{
+    width:100%;max-width:390px;background:#fff;border-radius:18px;padding:22px;
+    box-shadow:0 30px 80px rgba(6,10,20,.45);animation:pop .2s cubic-bezier(.2,.9,.3,1.15);
+    max-height:88vh;overflow:auto;
+  }
+  .modal h3{margin:0 0 4px;font-size:17px;font-weight:700}
+  .modal .desc{margin:0 0 18px;font-size:12.5px;color:var(--sub);line-height:1.55}
+  .field{margin-bottom:14px}
+  .field label{display:block;font-size:12px;font-weight:600;color:var(--sub);margin-bottom:6px}
+  .field input,.field select{
+    width:100%;height:40px;padding:0 11px;border-radius:10px;border:1px solid #dde2ea;
+    font-size:13.5px;font-family:inherit;color:var(--text);background:#fbfcfe;outline:none;
+  }
+  .field input:focus,.field select:focus{border-color:var(--brand);background:#fff;box-shadow:0 0 0 3px rgba(43,108,255,.12)}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .modal-actions{display:flex;gap:9px;margin-top:20px}
+  .btn{flex:1;height:42px;border-radius:11px;font-size:14px;font-weight:600;transition:.15s}
+  .btn.ghost{background:#f1f3f7;color:#39424f}
+  .btn.ghost:hover{background:#e7eaf1}
+  .btn.solid{background:var(--brand);color:#fff}
+  .btn.solid:hover{background:var(--brand-2)}
+  .hintbox{background:#f5f8ff;border:1px solid #dfe8ff;border-radius:10px;padding:10px 12px;font-size:11.5px;line-height:1.6;color:#48566f}
+  .hintbox b{color:var(--text)}
+
+  /* ---------- 进度 / 提示 ---------- */
+  #progress{
+    position:absolute;z-index:750;left:50%;top:calc(18px + env(safe-area-inset-top,0px));transform:translateX(-50%);
+    min-width:270px;max-width:82vw;padding:12px 16px;border-radius:13px;
+  }
+  #progress .pt{display:flex;justify-content:space-between;align-items:baseline;gap:14px;font-size:12.5px;font-weight:600}
+  #progress .pt span:last-child{color:var(--sub);font-variant-numeric:tabular-nums;font-size:11.5px}
+  #progress .bar{height:5px;border-radius:3px;background:#e6eaf1;margin-top:8px;overflow:hidden}
+  #progress .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--brand),#5b93ff);border-radius:3px;transition:width .2s}
+  #progress .sub{font-size:11px;color:var(--sub);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  #toast{
+    position:absolute;z-index:900;left:50%;bottom:calc(96px + var(--safe-b));transform:translateX(-50%);
+    padding:10px 18px;border-radius:11px;background:rgba(18,22,30,.9);color:#fff;font-size:13px;
+    backdrop-filter:blur(10px);box-shadow:0 8px 26px rgba(6,10,20,.35);max-width:84vw;text-align:center;
+    animation:pop .18s ease;line-height:1.5;
+  }
+
+  /* ---------- 播放 HUD ---------- */
+  #playHud{
+    position:absolute;z-index:620;left:50%;bottom:calc(24px + var(--safe-b));transform:translateX(-50%);
+    display:flex;align-items:center;gap:13px;padding:9px 10px 9px 15px;border-radius:14px;min-width:min(430px,90vw);
+  }
+  #playHud .info{flex:1;min-width:0}
+  #playHud .nm{font-size:12.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #playHud .tm{font-size:11px;color:var(--sub);margin-top:2px;font-variant-numeric:tabular-nums}
+  #playHud .pbar{height:3px;border-radius:2px;background:#e6eaf1;margin-top:7px;overflow:hidden}
+  #playHud .pbar i{display:block;height:100%;background:var(--brand);width:0;transition:width .25s linear}
+  #playHud .hbtn{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:#f1f3f7;color:#39424f}
+  #playHud .hbtn:hover{background:#e5e9f0}
+  #playHud .hbtn.stop{background:rgba(229,72,77,.12);color:var(--danger)}
+  #playHud .hbtn svg{width:16px;height:16px}
+
+  /* ---------- 手机形态 ---------- */
+  body.is-mobile #panelLeft{left:0;right:0;bottom:0;padding:0 10px calc(10px + var(--safe-b));align-items:stretch}
+  body.is-mobile .dock{width:100%;justify-content:space-around;border-radius:16px;padding:7px}
+  body.is-mobile .dock-btn{flex:1;justify-content:center;flex-direction:column;gap:3px;height:52px;width:auto;padding:0 4px;font-size:11px}
+  body.is-mobile .dock-btn svg{width:21px;height:21px}
+  body.is-mobile #statBar{align-self:center;margin-bottom:8px}
+  body.is-mobile #ctrlRight{bottom:calc(96px + var(--safe-b))}
+  body.is-mobile #playHud{bottom:calc(96px + var(--safe-b));min-width:0;width:calc(100% - 20px)}
+  body.is-mobile #importMenu{left:10px;right:10px;bottom:calc(90px + var(--safe-b));min-width:0}
+  body.is-mobile #viewer .frame{max-width:88vw;max-height:62vh}
+  body.is-mobile #viewerImg{max-height:calc(62vh - 12px)}
+  body.is-mobile #toast{bottom:calc(120px + var(--safe-b))}
+  body.is-mobile .pm-box{width:60px;height:60px}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- 右下：图层 / 形态 / 缩放 -->
+<div id="ctrlRight">
+  <div class="ctrl-group glass">
+    <button class="ctrl-btn" id="btnLayer" title="切换标准 / 卫星">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+    </button>
+    <button class="ctrl-btn" id="btnDevice" title="切换电脑 / 手机形态">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="14" height="10" rx="1.5"/><path d="M2 18h11"/><rect x="16" y="10" width="6" height="11" rx="1.5"/></svg>
+      <span class="badge" id="deviceBadge">PC</span>
+    </button>
+  </div>
+  <div class="ctrl-group glass">
+    <button class="ctrl-btn" id="btnZoomIn" title="放大">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="ctrl-btn" id="btnZoomOut" title="缩小">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+    </button>
+  </div>
+</div>
+
+<!-- 左下：功能区 -->
+<div id="panelLeft">
+  <div id="statBar" class="glass hidden">
+    <i class="dot"></i>
+    <span><b id="statTotal">0</b> 张定位照片</span>
+    <span id="statRange"></span>
+  </div>
+  <div class="dock glass">
+    <button class="dock-btn icon-only" id="btnImport" title="导入照片" aria-label="导入照片">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v13"/></svg>
+    </button>
+    <button class="dock-btn icon-only" id="btnLoad" title="增量加载数据" aria-label="增量加载数据">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="8" ry="3"/><path d="M4 5.5v13c0 1.66 3.58 3 8 3s8-1.34 8-3v-13"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>
+    </button>
+    <button class="dock-btn icon-only" id="btnSave" title="保存数据" aria-label="保存数据">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+    </button>
+    <button class="dock-btn icon-only" id="btnPlay" title="预览播放" aria-label="预览播放">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4.5v15l13-7.5-13-7.5Z"/></svg>
+    </button>
+  </div>
+</div>
+
+<!-- 导入方式菜单 -->
+<div id="importMenu" class="glass hidden">
+  <button class="menu-item" data-act="dir">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>
+    <span><span class="t">选择文件夹</span><span class="d">自动递归扫描全部子目录中的照片</span></span>
+  </button>
+  <button class="menu-item" data-act="files">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.8"/><path d="m21 16-5.5-5.5L6 20"/></svg>
+    <span><span class="t">选择照片</span><span class="d">可多选、可框选全选</span></span>
+  </button>
+</div>
+
+<input type="file" id="dirInput" webkitdirectory directory multiple class="hidden">
+<input type="file" id="fileInput" accept="image/*" multiple class="hidden">
+<input type="file" id="dbInput" accept=".db,.sqlite,.sqlite3,application/octet-stream" class="hidden">
+
+<!-- 播放 HUD -->
+<div id="playHud" class="glass hidden">
+  <button class="hbtn" id="hudToggle" title="暂停 / 继续">
+    <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+  </button>
+  <div class="info">
+    <div class="nm" id="hudName">—</div>
+    <div class="tm" id="hudTime">—</div>
+    <div class="pbar"><i id="hudBar"></i></div>
+  </div>
+  <button class="hbtn stop" id="hudStop" title="停止">
+    <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+  </button>
+</div>
+
+<!-- 进度 -->
+<div id="progress" class="glass hidden">
+  <div class="pt"><span id="progTitle">正在处理</span><span id="progCount"></span></div>
+  <div class="bar"><i id="progBar"></i></div>
+  <div class="sub" id="progSub"></div>
+</div>
+
+<!-- 播放设置 -->
+<div class="mask hidden" id="playModal">
+  <div class="modal">
+    <h3>播放轨迹</h3>
+    <p class="desc">按拍摄时间顺序依次高亮照片，地图只平移不缩放。</p>
+    <div class="row2">
+      <div class="field"><label>开始时间</label><input type="datetime-local" id="playStart"></div>
+      <div class="field"><label>结束时间</label><input type="datetime-local" id="playEnd"></div>
+    </div>
+    <div class="field">
+      <label>播放速度</label>
+      <select id="playSpeed">
+        <option value="0.5">0.5× 慢速</option>
+        <option value="1" selected>1× 正常</option>
+        <option value="2">2× 快速</option>
+        <option value="4">4×</option>
+        <option value="8">8× 极速</option>
+      </select>
+    </div>
+    <div class="hintbox" id="playHint"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="playCancel">取消</button>
+      <button class="btn solid" id="playConfirm">开始播放</button>
+    </div>
+  </div>
+</div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="exif.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

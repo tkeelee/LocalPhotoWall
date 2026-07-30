@@ -1,0 +1,28 @@
+# macOS 系统文件
+.DS_Store
+._.DS_Store
+.AppleDouble
+.LSOverride
+
+# 数据库文件（含照片数据，体积大且含个人隐私，不入库）
+photos.db
+photos_*.db
+*.sqlite
+*.sqlite3
+
+# 备份/临时文件
+*.bak
+*.bak.html
+*.tmp
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 工作记忆/会话记录
+.workbuddy/
+
+# 日志
+*.log
