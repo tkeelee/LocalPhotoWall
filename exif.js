@@ -331,7 +331,7 @@
     return r;
   }
 
-  /** 解析图片 ArrayBuffer 中的 EXIF（按文件头嗅探：JPEG / PNG / WebP / HEIC・HEIF） */
+  /** 解析图片 ArrayBuffer 中的 EXIF（按文件头嗅探：JPEG / PNG / WebP / HEIC・HEIF / TIFF） */
   function parse(buffer) {
     try {
       var view = new DataView(buffer);
@@ -340,6 +340,10 @@
       if (view.getUint32(0, false) === 0x89504e47) return finish(parsePng(view));
       if (fourcc(view, 0) === 'RIFF' && fourcc(view, 8) === 'WEBP') return finish(parseWebp(view));
       if (fourcc(view, 4) === 'ftyp') return finish(parseHeif(view));
+      // TIFF 裸文件：II*\0 (小端) 或 MM\0* (大端)
+      var b0 = view.getUint16(0, false), b1 = view.getUint16(2, false);
+      if ((b0 === 0x4949 && b1 === 0x002a) || (b0 === 0x4d4d && b1 === 0x002a))
+        return finish(readTiff(view, 0));
       return null;
     } catch (e) {
       return null;

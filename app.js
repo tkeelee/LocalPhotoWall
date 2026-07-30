@@ -24,7 +24,7 @@
   var db = null, SQL = null, dbHandle = null, dbDirty = false;
   var saveDirHandle = null;     // 保存目录句柄（File System Access API）
 
-  var viewerOpen = false, viewerUrl = null;
+  var viewerOpen = false, viewerUrl = null, viewerOwnerEl = null;
   var player = { running: false, paused: false, idx: 0, list: [], timer: null, speed: 1, activeEl: null, activeMk: null };
 
   /* ---------------- 短工具 ---------------- */
@@ -241,42 +241,16 @@
     b.classList.add('dirty');
   }
 
-  function saveDb(forcePick) {
-    if (!db) { toast('还没有数据可保存'); return Promise.resolve(); }
-    var bytes = db.export();
-    if (dbHandle && !forcePick) {
-      return dbHandle.createWritable().then(function (w) {
-        return w.write(bytes).then(function () { return w.close(); });
-      }).then(function () {
-        dbDirty = false; $('btnSave').classList.remove('dirty');
-        toast('已保存到 ' + (dbHandle.name || 'photos.db'));
-      }).catch(function (e) {
-        console.warn(e); dbHandle = null; return saveDb(true);
-      });
-    }
-    if (window.showSaveFilePicker) {
-      var opts = {
-        suggestedName: 'photos.db',
-        types: [{ description: 'SQLite 数据库', accept: { 'application/octet-stream': ['.db'] } }]
-      };
-      if (saveDirHandle) opts.startIn = saveDirHandle;
-      return window.showSaveFilePicker(opts).then(function (h) {
-        dbHandle = h;
-        return saveDb(false);
-      }).catch(function (e) {
-        if (e && e.name === 'AbortError') return;
-        downloadDb(bytes);
-      });
-    }
-    downloadDb(bytes);
-    return Promise.resolve();
+  /* ---------- 保存：目录直写 → 文件句柄 → 选择文件 → 下载，逐级降级 ---------- */
+  function markSaved() {
+    dbDirty = false;
+    $('btnSave').classList.remove('dirty');
   }
 
-  /* ---------- 保存到目录（自动备份旧文件 + 新建 photos.db）---------- */
   function tsName() {
     var d = new Date();
-    var p = function (n) { return n < 10 ? '0' + n : '' + n; };
-    return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+    return '' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+      pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
   }
 
   /* 首次操作时让用户选定项目目录（即 index.html 所在目录），之后所有加载/保存都默认到该目录 */
@@ -298,50 +272,56 @@
     }).catch(function () { return null; });
   }
 
-  function saveToDir() {
-    if (!db) { toast('还没有数据可保存'); return; }
-    if (!window.showDirectoryPicker) { saveDb(false); return; }
-    var bytes = db.export();
+  /* 写入项目目录：自动备份旧 photos.db 后覆盖新建 */
+  function writeToDir(bytes) {
+    var backupName = null;
+    // 检查现有 photos.db，有则先备份
+    return saveDirHandle.getFileHandle('photos.db').then(function (existing) {
+      backupName = 'photos_' + tsName() + '.db';
+      return existing.getFile().then(function (oldFile) {
+        return oldFile.arrayBuffer();
+      }).then(function (oldBuf) {
+        return saveDirHandle.getFileHandle(backupName, { create: true }).then(function (bh) {
+          return bh.createWritable().then(function (w) {
+            return w.write(oldBuf).then(function () { return w.close(); });
+          });
+        });
+      }).then(function () {
+        // 删除旧 photos.db（下面新建）
+        return saveDirHandle.removeEntry('photos.db');
+      });
+    }).catch(function () { /* 旧文件不存在，跳过备份 */ })
+      .then(function () {
+        // 写入新的 photos.db
+        return saveDirHandle.getFileHandle('photos.db', { create: true });
+      }).then(function (newHandle) {
+        return newHandle.createWritable().then(function (w) {
+          return w.write(bytes).then(function () { return w.close(); });
+        });
+      }).then(function () {
+        markSaved();
+        toast('已保存到 ' + saveDirHandle.name + '/photos.db' + (backupName ? '（旧版已备份 ' + backupName + '）' : ''), 5000);
+      });
+  }
 
-    var doSave = function () {
-      var backupName = null;
-      // 检查现有 photos.db
-      return saveDirHandle.getFileHandle('photos.db').then(function (existing) {
-        // 备份旧文件
-        backupName = 'photos_' + tsName() + '.db';
-        return existing.getFile().then(function (oldFile) {
-          return oldFile.arrayBuffer();
-        }).then(function (oldBuf) {
-          return saveDirHandle.getFileHandle(backupName, { create: true }).then(function (bh) {
-            return bh.createWritable().then(function (w) {
-              return w.write(oldBuf).then(function () { return w.close(); });
-            });
-          });
-        }).then(function () {
-          // 删除旧 photos.db（下面新建）
-          return saveDirHandle.removeEntry('photos.db');
-        });
-      }).catch(function () { /* 旧文件不存在，跳过备份 */ })
-        .then(function () {
-          // 写入新的 photos.db
-          return saveDirHandle.getFileHandle('photos.db', { create: true });
-        }).then(function (newHandle) {
-          return newHandle.createWritable().then(function (w) {
-            return w.write(bytes).then(function () { return w.close(); });
-          });
-        }).then(function () {
-          dbDirty = false; $('btnSave').classList.remove('dirty');
-          toast('已保存到 ' + saveDirHandle.name + '/photos.db' + (backupName ? '（旧版已备份 ' + backupName + '）' : ''), 5000);
-        });
+  function writeToFileHandle(bytes) {
+    return dbHandle.createWritable().then(function (w) {
+      return w.write(bytes).then(function () { return w.close(); });
+    }).then(function () {
+      markSaved();
+      toast('已保存到 ' + (dbHandle.name || 'photos.db'));
+    });
+  }
+
+  function pickFileAndWrite(bytes) {
+    var opts = {
+      suggestedName: 'photos.db',
+      types: [{ description: 'SQLite 数据库', accept: { 'application/octet-stream': ['.db'] } }]
     };
-
-    ensureProjectDir().then(function (h) {
-      if (!h) { saveDb(false); return; }
-      return doSave();
-    }).catch(function (e) {
-      if (e && e.name === 'AbortError') return;
-      console.warn('保存到目录失败，回退到下载方式', e);
-      saveDb(false);
+    if (saveDirHandle) opts.startIn = saveDirHandle;
+    return window.showSaveFilePicker(opts).then(function (h) {
+      dbHandle = h;
+      return writeToFileHandle(bytes);
     });
   }
 
@@ -352,8 +332,41 @@
     a.download = 'photos.db';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
-    dbDirty = false; $('btnSave').classList.remove('dirty');
+    markSaved();
     toast('已导出 photos.db，放到网页同目录即可被自动加载');
+  }
+
+  /* 统一保存入口 */
+  function saveData() {
+    if (!db) { toast('还没有数据可保存'); return Promise.resolve(); }
+    var bytes = db.export();
+
+    // 文件级降级：已有文件句柄直写 → 选择文件 → 下载
+    function fallbackFile() {
+      if (dbHandle) {
+        return writeToFileHandle(bytes).catch(function (e) {
+          console.warn('文件句柄写入失败，重新选择文件', e);
+          dbHandle = null;
+          return fallbackFile();
+        });
+      }
+      if (window.showSaveFilePicker) return pickFileAndWrite(bytes);
+      downloadDb(bytes);
+      return Promise.resolve();
+    }
+
+    return ensureProjectDir().then(function (dirH) {
+      if (dirH) return writeToDir(bytes);
+      return fallbackFile();
+    }).catch(function (e) {
+      if (e && e.name === 'AbortError') return;   // 用户取消选择，静默
+      console.warn('保存失败，尝试降级保存', e);
+      fallbackFile().catch(function (e2) {
+        if (e2 && e2.name === 'AbortError') return;
+        console.warn(e2);
+        downloadDb(bytes);
+      });
+    });
   }
 
   /** 从字节载入数据库并合并 */
@@ -370,6 +383,7 @@
       if (!db) { db = new SQL.Database(); db.run(SCHEMA); }
 
       var added = 0, skipped = 0, noGeo = 0;
+      var newOnes = [];
       if (res && res[0]) {
         var rows = res[0].values;
         for (var i = 0; i < rows.length; i++) {
@@ -386,11 +400,12 @@
           if (p.lat == null || p.lng == null) { noGeo++; continue; }
           photos.push(p);
           addMarker(p);
+          newOnes.push(p);
           added++;
         }
       }
       loaded.close();
-      return { added: added, skipped: skipped, noGeo: noGeo };
+      return { added: added, skipped: skipped, noGeo: noGeo, newOnes: newOnes };
     });
   }
 
@@ -574,7 +589,20 @@
     updateStat();
     if (stat.newOnes && stat.newOnes.length) fitToPhotos(stat.newOnes);
     markDirty();
-    if (saveDirHandle && dbDirty) saveToDir();
+    if (saveDirHandle && dbDirty) saveData();
+  }
+
+  /* 加载 db 后的统一收尾：更新统计、定位到新照片、提示结果 */
+  function reportLoad(r) {
+    progressDone();
+    updateStat();
+    if (r.newOnes && r.newOnes.length) fitToPhotos(r.newOnes);
+    var msg = '已加载 ' + r.added + ' 张照片';
+    var ext = [];
+    if (r.skipped) ext.push('重复跳过 ' + r.skipped);
+    if (r.noGeo) ext.push('无 GPS ' + r.noGeo);
+    if (ext.length) msg += '（' + ext.join(' · ') + '）';
+    toast(msg, 4000);
   }
 
   function fitToPhotos(list) {
@@ -588,16 +616,23 @@
     map.fitBounds(b, { padding: [100, 100], maxZoom: 17 });
   }
 
+  /* 返回有拍摄时间的照片及其时间范围 [min, max]，无照片时 min/max 为 null */
+  function photoTimeRange() {
+    var withT = photos.filter(function (p) { return p.takenTs != null; });
+    if (!withT.length) return { list: [], min: null, max: null };
+    var min = Math.min.apply(null, withT.map(function (p) { return p.takenTs; }));
+    var max = Math.max.apply(null, withT.map(function (p) { return p.takenTs; }));
+    return { list: withT, min: min, max: max };
+  }
+
   function updateStat() {
     var bar = $('statBar');
     if (!photos.length) { hide(bar); return; }
     show(bar);
     $('statTotal').textContent = photos.length;
-    var withT = photos.filter(function (p) { return p.takenTs != null; });
-    if (withT.length) {
-      var min = Math.min.apply(null, withT.map(function (p) { return p.takenTs; }));
-      var max = Math.max.apply(null, withT.map(function (p) { return p.takenTs; }));
-      $('statRange').textContent = '· ' + fmtTime(min).slice(0, 10) + ' 至 ' + fmtTime(max).slice(0, 10);
+    var tr = photoTimeRange();
+    if (tr.list.length) {
+      $('statRange').textContent = '· ' + fmtTime(tr.min).slice(0, 10) + ' 至 ' + fmtTime(tr.max).slice(0, 10);
     } else {
       $('statRange').textContent = '';
     }
@@ -653,7 +688,6 @@
    * ============================================================ */
   var viewerDom = null;
   var dismissBound = false;
-  var viewerOwnerEl = null;
 
   function buildViewer() {
     var box = document.createElement('div');
@@ -729,29 +763,25 @@
    * 七、播放引擎（只平移视野，不动缩放级别）
    * ============================================================ */
   function updatePlayHint() {
-    var withT = photos.filter(function (p) { return p.takenTs != null; });
-    if (!withT.length) {
+    var tr = photoTimeRange();
+    if (!tr.list.length) {
       $('playHint').innerHTML = '没有带拍摄时间的照片。';
       return;
     }
     var s = $('playStart').value, e = $('playEnd').value;
     var st = s ? new Date(s).getTime() : -Infinity;
     var et = e ? new Date(e).getTime() : Infinity;
-    var inRange = withT.filter(function (p) { return p.takenTs >= st && p.takenTs <= et; });
-    var allMin = Math.min.apply(null, withT.map(function (p) { return p.takenTs; }));
-    var allMax = Math.max.apply(null, withT.map(function (p) { return p.takenTs; }));
+    var inRange = tr.list.filter(function (p) { return p.takenTs >= st && p.takenTs <= et; });
     var msg = '当前时间范围内共 <b>' + inRange.length + '</b> 张照片';
-    msg += '（总共 ' + withT.length + ' 张，全范围 ' + fmtTime(allMin) + ' ~ ' + fmtTime(allMax) + '）';
+    msg += '（总共 ' + tr.list.length + ' 张，全范围 ' + fmtTime(tr.min) + ' ~ ' + fmtTime(tr.max) + '）';
     $('playHint').innerHTML = msg;
   }
 
   function openPlayModal() {
-    var withT = photos.filter(function (p) { return p.takenTs != null; });
-    if (withT.length < 1) { toast('还没有可播放的照片，请先导入或加载数据'); return; }
-    var min = Math.min.apply(null, withT.map(function (p) { return p.takenTs; }));
-    var max = Math.max.apply(null, withT.map(function (p) { return p.takenTs; }));
-    $('playStart').value = toLocalInput(min);
-    $('playEnd').value = toLocalInput(max + 60000);
+    var tr = photoTimeRange();
+    if (!tr.list.length) { toast('还没有可播放的照片，请先导入或加载数据'); return; }
+    $('playStart').value = toLocalInput(tr.min);
+    $('playEnd').value = toLocalInput(tr.max + 60000);
     updatePlayHint();
     show($('playModal'));
   }
@@ -891,17 +921,7 @@
       this.value = '';
       if (!f) return;
       progress('正在读取数据库', 0, 1, f.name);
-      readBuffer(f).then(loadDbBytes).then(function (r) {
-        progressDone();
-        updateStat();
-        if (r.added) fitToPhotos(photos);
-        var msg = '已加载 ' + r.added + ' 张照片';
-        var ext = [];
-        if (r.skipped) ext.push('重复跳过 ' + r.skipped);
-        if (r.noGeo) ext.push('无 GPS ' + r.noGeo);
-        if (ext.length) msg += '（' + ext.join(' · ') + '）';
-        toast(msg, 4000);
-      }).catch(function (e) {
+      readBuffer(f).then(loadDbBytes).then(reportLoad).catch(function (e) {
         progressDone();
         toast('加载失败：' + (e.message || e), 4000);
       });
@@ -926,15 +946,7 @@
         });
       }).then(function (r) {
         if (!r) return;
-        progressDone();
-        updateStat();
-        if (r.added) fitToPhotos(photos);
-        var msg = '已加载 ' + r.added + ' 张照片';
-        var ext = [];
-        if (r.skipped) ext.push('重复跳过 ' + r.skipped);
-        if (r.noGeo) ext.push('无 GPS ' + r.noGeo);
-        if (ext.length) msg += '（' + ext.join(' · ') + '）';
-        toast(msg, 4000);
+        reportLoad(r);
       }).catch(function (e) {
         progressDone();
         if (e && e.name === 'AbortError') return;
@@ -942,7 +954,7 @@
       });
     }
 
-    $('btnSave').addEventListener('click', function () { saveToDir(); });
+    $('btnSave').addEventListener('click', function () { saveData(); });
 
     $('btnPlay').addEventListener('click', openPlayModal);
     $('playCancel').addEventListener('click', function () { hide($('playModal')); });
@@ -984,7 +996,7 @@
       return loadDbBytes(buf).then(function (r) {
         if (r.added) {
           updateStat();
-          fitToPhotos(photos);
+          if (r.newOnes && r.newOnes.length) fitToPhotos(r.newOnes);
           toast('已自动加载同目录 photos.db：' + r.added + ' 张照片', 3600);
         }
       });

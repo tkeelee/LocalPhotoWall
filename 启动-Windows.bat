@@ -4,6 +4,14 @@ cd /d "%~dp0"
 set PORT=8623
 set PAGE=index.html
 
+rem 端口被占用则顺延（参照 Mac 版逻辑）
+:findport
+netstat -ano | findstr ":%PORT% " | findstr "LISTENING" >nul
+if %errorlevel%==0 (
+  set /a PORT+=1
+  goto findport
+)
+
 echo ───────────────────────────────────────
 echo  照片地图启动中...
 echo  电脑访问：http://localhost:%PORT%/%PAGE%
