@@ -265,7 +265,7 @@
       }).catch(function () { return saveDirHandle; });
     }
     if (!window.showDirectoryPicker) return Promise.resolve(null);
-    toast('请选择项目所在目录（含 index.html / photos.db），后续将默认使用此目录', 5000);
+    toast('请选择项目所在目录（含 index.html / photos.db），后续将默认使用此目录', 8000);
     return window.showDirectoryPicker({ mode: 'readwrite' }).then(function (h) {
       saveDirHandle = h;
       return h;
@@ -300,7 +300,7 @@
         });
       }).then(function () {
         markSaved();
-        toast('已保存到 ' + saveDirHandle.name + '/photos.db' + (backupName ? '（旧版已备份 ' + backupName + '）' : ''), 5000);
+        toast('已保存到 ' + saveDirHandle.name + '/photos.db' + (backupName ? '（旧版已备份 ' + backupName + '）' : ''), 8000);
       });
   }
 
@@ -396,8 +396,8 @@
           };
           if (hashSet[p.hash]) { skipped++; continue; }
           hashSet[p.hash] = true;
-          insertPhoto(p);
           if (p.lat == null || p.lng == null) { noGeo++; continue; }
+          insertPhoto(p);
           photos.push(p);
           addMarker(p);
           newOnes.push(p);
@@ -530,7 +530,7 @@
     importing = true;
     ensureDb().catch(function (e) {
       console.warn(e);
-      toast('数据库组件不可用，本次仅在地图上展示（建议用启动脚本打开）', 4200);
+      toast('数据库组件不可用，本次仅在地图上展示（建议用启动脚本打开）', 8000);
     }).then(function () {
       return runImport(files);
     }).then(function (stat) {
@@ -556,8 +556,8 @@
       return processFile(f).then(function (p) {
         if (p.dup) { stat.dup++; return; }
         hashSet[p.hash] = true;
-        insertPhoto(p);
         if (p.lat == null || p.lng == null) { stat.noGeo++; return; }
+        insertPhoto(p);
         photos.push(p);
         addMarker(p);
         newOnes.push(p);
@@ -578,13 +578,14 @@
   }
 
   function finishImport(stat) {
-    var msg = '导入完成：新增 ' + stat.ok + ' 张定位照片';
+    var msg = '共导入 ' + stat.total + ' 张';
     var ext = [];
-    if (stat.dup) ext.push('重复跳过 ' + stat.dup);
-    if (stat.noGeo) ext.push('无 GPS ' + stat.noGeo);
-    if (stat.fail) ext.push('失败 ' + stat.fail);
-    if (ext.length) msg += '（' + ext.join(' · ') + '）';
-    toast(msg, 4200);
+    if (stat.dup) ext.push(stat.dup + ' 张重复（根据哈希值判断）');
+    if (stat.noGeo) ext.push(stat.noGeo + ' 张未提取到经纬度');
+    if (stat.fail) ext.push(stat.fail + ' 张失败');
+    if (ext.length) msg += '，' + ext.join('，');
+    msg += '，实际导入 ' + stat.ok + ' 张。';
+    toast(msg, 8000);
 
     updateStat();
     if (stat.newOnes && stat.newOnes.length) fitToPhotos(stat.newOnes);
@@ -597,12 +598,14 @@
     progressDone();
     updateStat();
     if (r.newOnes && r.newOnes.length) fitToPhotos(r.newOnes);
-    var msg = '已加载 ' + r.added + ' 张照片';
+    var total = r.added + r.skipped + r.noGeo;
+    var msg = '共加载 ' + total + ' 张';
     var ext = [];
-    if (r.skipped) ext.push('重复跳过 ' + r.skipped);
-    if (r.noGeo) ext.push('无 GPS ' + r.noGeo);
-    if (ext.length) msg += '（' + ext.join(' · ') + '）';
-    toast(msg, 4000);
+    if (r.skipped) ext.push(r.skipped + ' 张重复（根据哈希值判断）');
+    if (r.noGeo) ext.push(r.noGeo + ' 张未提取到经纬度');
+    if (ext.length) msg += '，' + ext.join('，');
+    msg += '，实际导入 ' + r.added + ' 张。';
+    toast(msg, 8000);
   }
 
   function fitToPhotos(list) {
@@ -923,7 +926,7 @@
       progress('正在读取数据库', 0, 1, f.name);
       readBuffer(f).then(loadDbBytes).then(reportLoad).catch(function (e) {
         progressDone();
-        toast('加载失败：' + (e.message || e), 4000);
+        toast('加载失败：' + (e.message || e), 8000);
       });
     });
     // 通过 File System Access API 选择 .db 文件，默认指向项目目录
@@ -950,7 +953,7 @@
       }).catch(function (e) {
         progressDone();
         if (e && e.name === 'AbortError') return;
-        toast('加载失败：' + (e.message || e), 4000);
+        toast('加载失败：' + (e.message || e), 8000);
       });
     }
 
@@ -997,7 +1000,7 @@
         if (r.added) {
           updateStat();
           if (r.newOnes && r.newOnes.length) fitToPhotos(r.newOnes);
-          toast('已自动加载同目录 photos.db：' + r.added + ' 张照片', 3600);
+          toast('已自动加载同目录 photos.db：' + r.added + ' 张照片', 8000);
         }
       });
     }).catch(function () { /* 没有该文件则静默 */ });
@@ -1010,7 +1013,7 @@
     tryAutoLoadDb();
     if (IS_FILE) {
       setTimeout(function () {
-        toast('当前是双击打开（file:// 模式）：功能可用，但无法自动读取同目录 photos.db。建议用「启动-Mac.command / 启动-Windows.bat」打开，体验完整。', 6000);
+        toast('当前是双击打开（file:// 模式）：功能可用，但无法自动读取同目录 photos.db。建议用「启动-Mac.command / 启动-Windows.bat」打开，体验完整。', 8000);
       }, 1200);
     }
   }
