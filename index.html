@@ -207,6 +207,8 @@
   #progress .bar{height:5px;border-radius:3px;background:#e6eaf1;margin-top:8px;overflow:hidden}
   #progress .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--brand),#5b93ff);border-radius:3px;transition:width .2s}
   #progress .sub{font-size:11px;color:var(--sub);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .prog-cancel{display:block;width:fit-content;margin:8px 0 0 auto;background:#f1f3f7;color:#39424f;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600}
+  .prog-cancel:hover{background:#e5e9f0}
 
   #toast{
     position:absolute;z-index:900;left:50%;top:50%;transform:translate(-50%,-50%);
@@ -290,6 +292,11 @@
     <button class="dock-btn icon-only" id="btnPlay" title="预览播放" aria-label="预览播放">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4.5v15l13-7.5-13-7.5Z"/></svg>
     </button>
+    <!-- 【离线下载已禁用】按钮保留注释
+    <button class="dock-btn icon-only" id="btnOffline" title="下载离线瓦片" aria-label="下载离线瓦片">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 18a5 5 0 0 1-1-9.9A6 6 0 0 1 19 8a4.5 4.5 0 0 1-1 8.9"/><path d="M12 12v6"/><path d="m9 15 3 3 3-3"/></svg>
+    </button>
+    -->
   </div>
 </div>
 
@@ -329,6 +336,7 @@
   <div class="pt"><span id="progTitle">正在处理</span><span id="progCount"></span></div>
   <div class="bar"><i id="progBar"></i></div>
   <div class="sub" id="progSub"></div>
+  <!-- 【离线下载已禁用】 <button id="progCancel" class="prog-cancel hidden">取消</button> -->
 </div>
 
 <!-- 播放设置 -->
@@ -357,6 +365,49 @@
     </div>
   </div>
 </div>
+
+<!-- 【离线下载已禁用】以下弹窗保留注释，不启用 ——
+<div class="mask hidden" id="offlineModal">
+  <div class="modal">
+    <h3>下载离线瓦片</h3>
+    <p class="desc">把海外照片点位附近的地图瓦片下载到应用目录 tiles/ 下，之后地图优先读本地、秒开。需用 Chrome / Edge 打开本页面。</p>
+    <div class="hintbox" id="offHint"></div>
+    <div class="row2">
+      <div class="field"><label>起始层级</label>
+        <select id="offZmin">
+          <option value="11">11</option><option value="12">12</option><option value="13" selected>13</option>
+          <option value="14">14</option><option value="15">15</option>
+        </select>
+      </div>
+      <div class="field"><label>结束层级</label>
+        <select id="offZmax">
+          <option value="13">13</option><option value="14">14</option><option value="15">15</option>
+          <option value="16" selected>16</option><option value="17">17</option>
+        </select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>点位边距（每方向瓦片数）</label>
+        <select id="offMargin">
+          <option value="1">1</option><option value="2">2</option><option value="3" selected>3</option>
+          <option value="4">4</option><option value="5">5</option>
+        </select>
+      </div>
+      <div class="field"><label>图层</label>
+        <div style="display:flex;gap:14px;align-items:center;height:40px;font-size:13.5px">
+          <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="offStd" checked> 标准图</label>
+          <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="offSat" checked> 卫星+标注</label>
+        </div>
+      </div>
+    </div>
+    <div class="hintbox" id="offEst"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="offCancel">取消</button>
+      <button class="btn solid" id="offStart">开始下载</button>
+    </div>
+  </div>
+</div>
+-->
 
 <script src="vendor/leaflet.js"></script>
 <script src="exif.js"></script>

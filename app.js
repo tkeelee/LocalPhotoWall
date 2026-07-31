@@ -16,7 +16,10 @@
 
   var map = null;
   var stdLayer = null, satLayer = null, satRoadLayer = null;
+  var overLayers = {};            // 海外底图：id -> L.TileLayer（本地优先 / 远端兜底）
   var isSatellite = false;
+  var inChinaNow = true;          // 地图中心是否在国内（国内用高德 / 海外用全球瓦片）
+  var offlineReady = false;       // 是否已下载过本地瓦片（true 时海外优先读 tiles/）
   var isMobile = false;
 
   var photos = [];              // {hash,name,path,takenTs,...,gLat,gLng,marker,el}
@@ -115,6 +118,40 @@
     }, opts || {}));
   }
 
+  /* 海外底图配置（全球覆盖，免 Key，WGS84）。
+     std 用 OSM 标准图（显示用）。离线下载功能已禁用（见下方注释块）；
+     若日后启用下载，需把 std 换成支持 CORS 的源（如 CARTO Voyager）。
+     id/ext 仅供本地瓦片路径使用，下载禁用时无影响。 */
+  var OVER_CFG = [
+    { id: 'std',   url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', sub: ['a', 'b', 'c'], ext: 'png', attr: '© OpenStreetMap' },
+    { id: 'sat',   url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', sub: [], ext: 'jpg', attr: '© Esri' },
+    { id: 'label', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', sub: [], ext: 'png', attr: '' }
+  ];
+
+  /* 本地优先、远端兜底的瓦片层：
+     已下载(offlineReady) → 先读 tiles/<id>/<z>/<x>/<y>.<ext>，404 再回源；
+     未下载 → 直接回源，避免海量 404。 */
+  function offlineTileLayer(cfg) {
+    var opts = { minZoom: 3, maxZoom: 19, maxNativeZoom: 18, attribution: cfg.attr || '' };
+    if (cfg.sub && cfg.sub.length) opts.subdomains = cfg.sub;
+    var layer = L.tileLayer(cfg.url, opts);
+    layer.createTile = function (coords, done) {
+      var img = document.createElement('img');
+      var local = 'tiles/' + cfg.id + '/' + coords.z + '/' + coords.x + '/' + coords.y + '.' + cfg.ext;
+      var remote = layer.getTileUrl(coords);
+      var triedRemote = false;
+      img.onload = function () { done(null, img); };
+      img.onerror = function () {
+        if (!triedRemote) { triedRemote = true; img.src = remote; }
+        else { done(new Error('tile'), img); }
+      };
+      if (offlineReady) img.src = local;
+      else { triedRemote = true; img.src = remote; }
+      return img;
+    };
+    return layer;
+  }
+
   function initMap() {
     map = L.map('map', {
       center: [39.90923, 116.397428],
@@ -125,15 +162,20 @@
       wheelPxPerZoomLevel: 90
     });
 
-    // 标准 2D 高清路网图
+    // 标准 2D 高清路网图（仅国内有详情，海外为空白）
     stdLayer = tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}');
-    // 卫星影像 + 路网标注
+    // 卫星影像 + 路网标注（国内）
     satLayer = tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}');
     satRoadLayer = tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}');
 
-    stdLayer.addTo(map);
+    // 海外底图（全球覆盖，免 Key，WGS84 —— 海外点位不做 GCJ02 偏移，天然对齐）
+    OVER_CFG.forEach(function (cfg) { overLayers[cfg.id] = offlineTileLayer(cfg); });
+    // offlineReady = localStorage.getItem('pw_offline') === '1';   // 【离线下载已禁用】保持 false，始终走远端
+
+    applyBasemap();   // 按 inChinaNow / isSatellite 决定显示哪套底图
 
     map.on('zoomend', updateAllScales);
+    map.on('moveend', detectRegion);   // 平移/缩放后按中心点判定国内↔海外
     map.on('click', function () { closeViewer(); });
 
     $('btnZoomIn').addEventListener('click', function () { map.zoomIn(); });
@@ -142,21 +184,46 @@
     $('btnDevice').addEventListener('click', function () { setDevice(!isMobile, true); });
   }
 
+  /* 国内判定边界与 exif.js 的 outOfChina 一致：境外 GCJ02 转换为恒等，
+     故海外用 WGS84 瓦片与照片点位天然对齐，无需纠偏。 */
+  function inChina(lat, lng) {
+    return lng > 73.66 && lng < 135.05 && lat > 3.86 && lat < 53.55;
+  }
+
+  /* 按「国内/海外 × 标准/卫星」组合切换底图 */
+  function applyBasemap() {
+    [stdLayer, satLayer, satRoadLayer].forEach(function (l) {
+      if (l && map.hasLayer(l)) map.removeLayer(l);
+    });
+    Object.keys(overLayers).forEach(function (k) {
+      var l = overLayers[k];
+      if (l && map.hasLayer(l)) map.removeLayer(l);
+    });
+    if (inChinaNow) {
+      if (isSatellite) { satLayer.addTo(map); satRoadLayer.addTo(map); }
+      else { stdLayer.addTo(map); }
+    } else {
+      if (isSatellite) { overLayers['sat'].addTo(map); overLayers['label'].addTo(map); }
+      else { overLayers['std'].addTo(map); }
+    }
+  }
+
+  /* 平移/缩放后，按地图中心判定是否需要切换国内↔海外底图 */
+  function detectRegion() {
+    var c = map.getCenter();
+    var now = inChina(c.lat, c.lng);
+    if (now !== inChinaNow) {
+      inChinaNow = now;
+      applyBasemap();
+      toast(now ? '已切换：国内（高德地图）' : '已切换：海外（全球地图）');
+    }
+  }
+
   function toggleLayer() {
     isSatellite = !isSatellite;
-    if (isSatellite) {
-      map.removeLayer(stdLayer);
-      satLayer.addTo(map);
-      satRoadLayer.addTo(map);
-      $('btnLayer').classList.add('on');
-      toast('已切换到卫星影像');
-    } else {
-      map.removeLayer(satLayer);
-      map.removeLayer(satRoadLayer);
-      stdLayer.addTo(map);
-      $('btnLayer').classList.remove('on');
-      toast('已切换到标准地图');
-    }
+    applyBasemap();
+    $('btnLayer').classList.toggle('on', isSatellite);
+    toast(isSatellite ? '已切换到卫星影像' : '已切换到标准地图');
   }
 
   function setDevice(mobile, byUser) {
@@ -971,6 +1038,16 @@
     $('hudStop').addEventListener('click', function () { stopPlay(false); });
     $('hudToggle').addEventListener('click', pausePlay);
 
+    // 【离线下载已禁用】以下 UI 接线注释保留，代码不启用
+    // $('btnOffline').addEventListener('click', openOfflineModal);
+    // $('offCancel').addEventListener('click', function () { hide($('offlineModal')); });
+    // $('offlineModal').addEventListener('click', function (e) { if (e.target === this) hide(this); });
+    // $('offStart').addEventListener('click', startOfflineDownload);
+    // ['offZmin', 'offZmax', 'offMargin', 'offStd', 'offSat'].forEach(function (id) {
+    //   $(id).addEventListener('change', updateOfflineEstimate);
+    // });
+    // $('progCancel').addEventListener('click', function () { tileCancel = true; });
+
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') { closeViewer(); hide($('playModal')); if (player.running) stopPlay(false); }
       if (e.key === ' ' && player.running) { e.preventDefault(); pausePlay(); }
@@ -980,6 +1057,157 @@
       if (dbDirty) { e.preventDefault(); e.returnValue = ''; }
     });
   }
+
+  // ===【已禁用】离线瓦片下载功能（代码保留备用）===
+  // 重新启用步骤：① 取消本段及 bindUI/HTML 中相关注释 ② 把 OVER_CFG 的 std 换成支持
+  //   CORS 的源（如 CARTO Voyager），否则 fetch 下载会被 CORS 拦截
+  //   ③ 取消 initMap 中 offlineReady = localStorage... 一行的注释
+  /* --- 以下离线下载代码已禁用，保留备用 ---
+  function lon2tileX(lon, z) { return Math.floor((lon + 180) / 360 * Math.pow(2, z)); }
+  function lat2tileY(lat, z) {
+    var l = lat * Math.PI / 180;
+    return Math.floor((1 - Math.log(Math.tan(l) + 1 / Math.cos(l)) / Math.PI) / 2 * Math.pow(2, z));
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function tileRemoteUrl(cfg, z, x, y) {
+    var url = cfg.url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+    if (cfg.sub && cfg.sub.length) url = url.replace('{s}', cfg.sub[(x + y) % cfg.sub.length]);
+    return url;
+  }
+
+  // 计算覆盖所有海外照片点位的瓦片清单（含边距），返回 [{layer,z,x,y}]
+  function computeOverseasTiles(zMin, zMax, margin, layerIds) {
+    var set = Object.create(null);
+    var pts = photos.filter(function (p) {
+      return p.lat != null && p.lng != null && !inChina(p.lat, p.lng);
+    });
+    for (var z = zMin; z <= zMax; z++) {
+      var maxIdx = Math.pow(2, z);
+      for (var pi = 0; pi < pts.length; pi++) {
+        var p = pts[pi];
+        var cx = lon2tileX(p.lng, z), cy = lat2tileY(p.lat, z);
+        for (var dx = -margin; dx <= margin; dx++) {
+          for (var dy = -margin; dy <= margin; dy++) {
+            var x = cx + dx, y = cy + dy;
+            if (x < 0 || y < 0 || x >= maxIdx || y >= maxIdx) continue;
+            for (var li = 0; li < layerIds.length; li++) {
+              set[layerIds[li] + '|' + z + '|' + x + '|' + y] = 1;
+            }
+          }
+        }
+      }
+    }
+    return Object.keys(set).map(function (k) {
+      var a = k.split('|'); return { layer: a[0], z: +a[1], x: +a[2], y: +a[3] };
+    });
+  }
+
+  var tileCancel = false;
+  var dirCache = Object.create(null);
+  async function getTileDir(tilesDir, layer, z, x) {
+    var key = layer + '/' + z + '/' + x;
+    if (dirCache[key]) return dirCache[key];
+    var d = tilesDir;
+    d = await d.getDirectoryHandle(layer, { create: true });
+    d = await d.getDirectoryHandle(String(z), { create: true });
+    d = await d.getDirectoryHandle(String(x), { create: true });
+    dirCache[key] = d;
+    return d;
+  }
+
+  async function downloadOfflineTiles(items) {
+    if (!window.showDirectoryPicker) throw new Error('当前浏览器不支持本地目录写入，请用 Chrome / Edge 打开本页面');
+    var dirH = await ensureProjectDir();
+    if (!dirH) throw new Error('未授权项目目录');
+    var tilesDir = await dirH.getDirectoryHandle('tiles', { create: true });
+    var CONC = 6, idx = 0, ok = 0, skip = 0, fail = 0, done = 0, total = items.length;
+    async function worker() {
+      while (idx < total) {
+        if (tileCancel) return;
+        var it = items[idx++];
+        var cfg = null;
+        for (var i = 0; i < OVER_CFG.length; i++) if (OVER_CFG[i].id === it.layer) { cfg = OVER_CFG[i]; break; }
+        if (!cfg) { fail++; done++; continue; }
+        try {
+          var zDir = await getTileDir(tilesDir, it.layer, it.z, it.x);
+          var fname = it.y + '.' + cfg.ext;
+          var exists = true;
+          try { await zDir.getFileHandle(fname); } catch (e) { exists = false; }
+          if (exists) { skip++; done++; continue; }
+          var resp = await fetch(tileRemoteUrl(cfg, it.z, it.x, it.y));
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          var blob = await resp.blob();
+          if (!blob || blob.size < 100) throw new Error('空瓦片');
+          var fh = await zDir.getFileHandle(fname, { create: true });
+          var w = await fh.createWritable();
+          await w.write(blob);
+          await w.close();
+          ok++;
+        } catch (e) { fail++; }
+        done++;
+        if (done % 4 === 0 || done === total) {
+          progress('下载离线瓦片', done, total, '成功 ' + ok + ' · 跳过 ' + skip + ' · 失败 ' + fail + (tileCancel ? ' · 已取消' : ''));
+          await sleep(0);
+        }
+      }
+    }
+    var ws = [];
+    for (var i = 0; i < CONC; i++) ws.push(worker());
+    await Promise.all(ws);
+    for (var k in dirCache) delete dirCache[k];
+    return { ok: ok, skip: skip, fail: fail, total: total };
+  }
+
+  function openOfflineModal() {
+    if (!photos.length) { toast('请先导入或加载照片，再下载离线瓦片', 5000); return; }
+    var overseas = photos.filter(function (p) { return p.lat != null && p.lng != null && !inChina(p.lat, p.lng); }).length;
+    if (!overseas) { toast('当前没有海外照片点位，无需下载离线瓦片', 5000); return; }
+    $('offHint').textContent = '当前海外照片 ' + overseas + ' 张。下载后瓦片存入应用目录 tiles/，地图将优先读取本地。';
+    show($('offlineModal'));
+    updateOfflineEstimate();
+  }
+  function updateOfflineEstimate() {
+    var zMin = +$('offZmin').value, zMax = +$('offZmax').value, margin = +$('offMargin').value;
+    var ids = [];
+    if ($('offStd').checked) ids.push('std');
+    if ($('offSat').checked) { ids.push('sat'); ids.push('label'); }
+    if (!ids.length) { $('offEst').textContent = '请至少选择一个图层'; return; }
+    if (zMin > zMax) { $('offEst').textContent = '起始层级不能大于结束层级'; return; }
+    var items = computeOverseasTiles(zMin, zMax, margin, ids);
+    $('offEst').textContent = '预计下载 ' + items.length + ' 块瓦片（层级 ' + zMin + '–' + zMax + '，边距 ' + margin + '；已存在的会自动跳过，失败可重跑补齐）';
+  }
+  async function startOfflineDownload() {
+    var zMin = +$('offZmin').value, zMax = +$('offZmax').value, margin = +$('offMargin').value;
+    if (zMin > zMax) { toast('起始层级不能大于结束层级', 4000); return; }
+    var ids = [];
+    if ($('offStd').checked) ids.push('std');
+    if ($('offSat').checked) { ids.push('sat'); ids.push('label'); }
+    if (!ids.length) { toast('请至少选择一个图层', 4000); return; }
+    var items = computeOverseasTiles(zMin, zMax, margin, ids);
+    if (!items.length) { toast('没有需要下载的瓦片', 4000); return; }
+    hide($('offlineModal'));
+    tileCancel = false;
+    var b = $('progCancel'); if (b) b.classList.remove('hidden');
+    progress('下载离线瓦片', 0, items.length, '准备下载…');
+    try {
+      var r = await downloadOfflineTiles(items);
+      if (!tileCancel) { offlineReady = true; localStorage.setItem('pw_offline', '1'); }
+      toast('下载完成：成功 ' + r.ok + ' · 跳过 ' + r.skip + ' · 失败 ' + r.fail + (tileCancel ? ' · 已取消' : ''), 8000);
+      if (offlineReady) {   // 刷新当前海外图层，让本地副本生效
+        Object.keys(overLayers).forEach(function (k) {
+          var l = overLayers[k];
+          if (l && map.hasLayer(l)) l.redraw();
+        });
+      }
+    } catch (e) {
+      toast('下载失败：' + (e.message || e), 8000);
+    } finally {
+      var b2 = $('progCancel'); if (b2) b2.classList.add('hidden');
+      progressDone();
+    }
+  }
+  */
 
   /* ============================================================
    * 九、启动
