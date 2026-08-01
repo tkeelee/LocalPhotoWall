@@ -100,7 +100,7 @@
   #statBar b{color:var(--text);font-weight:700;font-size:13px}
   #statBar .dot{width:5px;height:5px;border-radius:50%;background:#34c759}
 
-  #importMenu{
+  #importMenu,#loadMenu{
     position:absolute;z-index:650;left:calc(14px + var(--safe-l));
     bottom:calc(78px + var(--safe-b));
     padding:6px;border-radius:var(--r);min-width:210px;
@@ -263,7 +263,7 @@
     position:absolute;z-index:900;left:50%;top:50%;transform:translate(-50%,-50%);
     padding:12px 20px;border-radius:12px;background:rgba(18,22,30,.92);color:#fff;font-size:13.5px;
     backdrop-filter:blur(10px);box-shadow:0 8px 26px rgba(6,10,20,.35);max-width:84vw;text-align:center;
-    animation:pop .18s ease;line-height:1.55;
+    line-height:1.55;
   }
 
   /* ---------- 播放 HUD ---------- */
@@ -468,7 +468,7 @@
     <button class="dock-btn icon-only" id="btnLoad" title="增量加载数据" aria-label="增量加载数据">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="8" ry="3"/><path d="M4 5.5v13c0 1.66 3.58 3 8 3s8-1.34 8-3v-13"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>
     </button>
-    <button class="dock-btn icon-only hidden" id="btnSave" title="保存数据" aria-label="保存数据">
+    <button class="dock-btn icon-only hidden" id="btnSave" title="备份数据库" aria-label="备份数据库">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
     </button>
     <button class="dock-btn icon-only" id="btnPlay" title="预览播放" aria-label="预览播放">
@@ -486,6 +486,18 @@
     </button>
     -->
   </div>
+</div>
+
+<!-- 增量加载菜单 -->
+<div id="loadMenu" class="glass hidden">
+  <button class="menu-item" data-act="file">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+    <span><span class="t">增量加载</span><span class="d">选择已有的 .db 数据库文件追加加载</span></span>
+  </button>
+  <button class="menu-item" data-act="dir">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>
+    <span><span class="t">初始空间</span><span class="d">读取目录下 photos.db，不存在则自动创建</span></span>
+  </button>
 </div>
 
 <!-- 导入方式菜单 -->
@@ -557,7 +569,7 @@
 <div class="mask hidden" id="dbManageModal">
   <div class="modal">
     <h3>数据库直接管理</h3>
-    <p class="desc" id="dbManageDesc">预览 / 编辑 / 导入 / 导出当前照片墙数据库。编辑仅可修改「文件名」与「照片路径」，其他字段只读。</p>
+    <p class="desc" id="dbManageDesc">预览 / 编辑 / 导入 / 导出照片墙数据库。内存模式仅只读预览，如需编辑请选择其他 db 文件。编辑仅可修改「文件名」与「照片路径」，其他字段只读。</p>
 
     <div class="db-result hidden" id="dbResult"></div>
 
