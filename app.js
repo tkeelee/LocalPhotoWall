@@ -14,6 +14,12 @@
   var SCALE_MIN = 0.28, SCALE_MAX = 3.2;
   var FALLBACK_UPSCALE = 5;     // 原图缺失时缩略图放大倍数
 
+  /* 性能优化：低缩放用 Canvas 圆点，高缩放用缩略图 + 视口裁剪 */
+  var ZOOM_THUMB = 14;          // >= 此层级渲染缩略图标记；< 此层级渲染 Canvas 圆点
+  var VIEWPORT_PAD = 0.5;       // 视口外扩比例，避免平移时频繁增删
+  var RENDER_BATCH = 60;        // 每帧批量创建的缩略图标记数
+  var LOAD_BATCH = 200;         // 数据库加载每批处理的行数
+
   var map = null;
   var stdLayer = null, satLayer = null, satRoadLayer = null;
   var overLayers = {};            // 海外底图：id -> L.TileLayer（本地优先 / 远端兜底）
@@ -29,6 +35,12 @@
 
   var viewerOpen = false, viewerUrl = null, viewerOwnerEl = null;
   var player = { running: false, paused: false, idx: 0, list: [], timer: null, speed: 1, activeEl: null, activeMk: null };
+
+  /* 渲染层：高缩放用 thumbLayer(divIcon 缩略图 + 视口裁剪)，低缩放用 dotLayer(Canvas 圆点) */
+  var thumbLayer = null, dotLayer = null, dotRenderer = null;
+  var renderRaf = 0, scaleRaf = 0;
+  var dotsBuilt = false;            // dotLayer 是否已填充
+  var playerThumb = null;           // 播放时低缩放下当前照片的临时缩略图 marker
 
   /* ---------------- 短工具 ---------------- */
   function $(id) { return document.getElementById(id); }
@@ -174,8 +186,13 @@
 
     applyBasemap();   // 按 inChinaNow / isSatellite 决定显示哪套底图
 
-    map.on('zoomend', updateAllScales);
-    map.on('moveend', detectRegion);   // 平移/缩放后按中心点判定国内↔海外
+    // 渲染层初始化：thumbLayer(divIcon 缩略图) / dotLayer(Canvas 圆点) 按缩放级别切换
+    thumbLayer = L.layerGroup();
+    dotLayer = L.layerGroup();
+    dotRenderer = L.canvas({ padding: 0.5 });
+
+    map.on('zoomend', function () { updateAllScales(); scheduleRender(); });
+    map.on('moveend', function () { detectRegion(); scheduleRender(); });
     map.on('click', function () { closeViewer(); });
 
     $('btnZoomIn').addEventListener('click', function () { map.zoomIn(); });
@@ -436,7 +453,7 @@
     });
   }
 
-  /** 从字节载入数据库并合并 */
+  /** 从字节载入数据库并合并（分批处理，避免大数据集卡死主线程） */
   function loadDbBytes(bytes) {
     return loadSqlJs().then(function () {
       var loaded = new SQL.Database(new Uint8Array(bytes));
@@ -449,11 +466,14 @@
       }
       if (!db) { db = new SQL.Database(); db.run(SCHEMA); }
 
-      var added = 0, skipped = 0, noGeo = 0;
-      var newOnes = [];
-      if (res && res[0]) {
-        var rows = res[0].values;
-        for (var i = 0; i < rows.length; i++) {
+      var rows = (res && res[0]) ? res[0].values : [];
+      loaded.close();
+
+      var stat = { added: 0, skipped: 0, noGeo: 0, newOnes: [] };
+      // 分批处理：每批 LOAD_BATCH 行，批间让出主线程，保持 UI 响应
+      function chunk(start) {
+        var end = Math.min(start + LOAD_BATCH, rows.length);
+        for (var i = start; i < end; i++) {
           var r = rows[i];
           var p = {
             hash: r[0], name: r[1], path: r[2], takenStr: r[3], takenTs: r[4],
@@ -461,18 +481,24 @@
             thumb: r[11], tw: r[12] || THUMB_MAX, th: r[13] || THUMB_MAX,
             file: null, fromDb: true
           };
-          if (hashSet[p.hash]) { skipped++; continue; }
+          if (hashSet[p.hash]) { stat.skipped++; continue; }
           hashSet[p.hash] = true;
-          if (p.lat == null || p.lng == null) { noGeo++; continue; }
+          if (p.lat == null || p.lng == null) { stat.noGeo++; continue; }
           insertPhoto(p);
+          preparePhoto(p);   // 只算坐标，不创建 marker（由 renderVisible 按需创建）
           photos.push(p);
-          addMarker(p);
-          newOnes.push(p);
-          added++;
+          stat.newOnes.push(p);
+          stat.added++;
         }
+        if (end < rows.length) {
+          progress('正在加载数据库', end, rows.length, '已解析 ' + stat.added + ' 张');
+          return new Promise(function (resolve) { setTimeout(resolve, 0); }).then(function () {
+            return chunk(end);
+          });
+        }
+        return stat;
       }
-      loaded.close();
-      return { added: added, skipped: skipped, noGeo: noGeo, newOnes: newOnes };
+      return chunk(0);
     });
   }
 
@@ -625,8 +651,8 @@
         hashSet[p.hash] = true;
         if (p.lat == null || p.lng == null) { stat.noGeo++; return; }
         insertPhoto(p);
+        preparePhoto(p);   // 只算坐标，不创建 marker
         photos.push(p);
-        addMarker(p);
         newOnes.push(p);
         stat.ok++;
       }).catch(function (e) {
@@ -657,6 +683,7 @@
     updateStat();
     if (stat.newOnes && stat.newOnes.length) fitToPhotos(stat.newOnes);
     markDirty();
+    scheduleRender();   // 显式触发渲染
     if (saveDirHandle && dbDirty) saveData();
   }
 
@@ -665,6 +692,9 @@
     progressDone();
     updateStat();
     if (r.newOnes && r.newOnes.length) fitToPhotos(r.newOnes);
+    markDirty();   // 加载后标记脏数据，显示保存按钮
+    // 显式触发渲染：同区域增量加载时 fitToPhotos 可能不触发 moveend
+    scheduleRender();
     var total = r.added + r.skipped + r.noGeo;
     var msg = '共加载 ' + total + ' 张';
     var ext = [];
@@ -716,15 +746,29 @@
     return clamp(Math.pow(2, (z - REF_ZOOM) * SCALE_EXP), SCALE_MIN, SCALE_MAX);
   }
 
-  function addMarker(p) {
+  /* 仅计算 GCJ02 纠偏后的坐标，不创建任何 marker（由 renderVisible 按需创建） */
+  function preparePhoto(p) {
     var g = ExifLite.wgs84ToGcj02(p.lng, p.lat);   // 高德瓦片为 GCJ02，需纠偏
     p.gLng = g[0]; p.gLat = g[1];
+  }
 
+  /* 创建 divIcon 缩略图 marker（高缩放模式用，由 thumbLayer 管理增删） */
+  function createThumbMarker(p) {
     var el = document.createElement('div');
     el.className = 'pm' + (p.approxTime ? ' no-time' : '');
     el.style.setProperty('--s', currentScale());
-    el.innerHTML = '<span class="pm-wobble"><span class="pm-box" style="display:block"><img alt=""></span></span>';
-    el.querySelector('img').src = p.thumb;
+
+    var wob = document.createElement('span');
+    wob.className = 'pm-wobble';
+    var box = document.createElement('span');
+    box.className = 'pm-box';
+    box.style.display = 'block';
+    var img = document.createElement('img');
+    img.alt = '';
+    img.src = p.thumb;
+    box.appendChild(img);
+    wob.appendChild(box);
+    el.appendChild(wob);
 
     var icon = L.divIcon({ className: 'pm-icon', html: el, iconSize: [0, 0], iconAnchor: [0, 0] });
     var marker = L.marker([p.gLat, p.gLng], { icon: icon, riseOnHover: true });
@@ -737,20 +781,176 @@
       openViewer(p, el);
     });
 
-    marker.addTo(map);
-    p.marker = marker;
     p.el = el;
+    p.marker = marker;
+    return marker;
+  }
+
+  /* 销毁缩略图 marker 的 DOM 引用（从 thumbLayer 移除时调用） */
+  function disposeThumbMarker(p) {
+    p.marker = null;
+    p.el = null;
+  }
+
+  /* 创建 Canvas 圆点 marker（低缩放模式用，共享一个 canvas，性能极佳） */
+  function createDotMarker(p) {
+    var dot = L.circleMarker([p.gLat, p.gLng], {
+      renderer: dotRenderer,
+      radius: 4,
+      weight: 1,
+      color: '#ffffff',
+      fillColor: '#2b6cff',
+      fillOpacity: 0.85,
+      interactive: true
+    });
+    dot.on('click', function (e) {
+      L.DomEvent.stopPropagation(e);   // 阻止冒泡到 map.click，否则 viewer 会被立即关闭
+      if (viewerOpen && viewerOwnerEl === dot) { closeViewer(); return; }
+      openViewer(p, dot);
+    });
+    p.dot = dot;
+    return dot;
+  }
+
+  /* rAF 防抖：平移/缩放过程中合并多次 moveend/zoomend */
+  function scheduleRender() {
+    if (renderRaf) return;
+    renderRaf = requestAnimationFrame(function () {
+      renderRaf = 0;
+      renderVisible();
+    });
+  }
+
+  /* 核心渲染调度：高缩放用缩略图 + 视口裁剪，低缩放用 Canvas 圆点 */
+  function renderVisible() {
+    if (!map || !thumbLayer) return;
+    var z = map.getZoom();
+    var wantThumb = z >= ZOOM_THUMB;
+
+    if (wantThumb) {
+      /* —— 缩略图模式 —— */
+      if (map.hasLayer(dotLayer)) map.removeLayer(dotLayer);
+      // 清理 dot 模式下播放用的临时缩略图（thumb 模式下当前照片走正常 thumbLayer）
+      clearPlayerThumb();
+      if (!map.hasLayer(thumbLayer)) map.addLayer(thumbLayer);
+
+      var bounds = map.getBounds().pad(VIEWPORT_PAD);
+
+      // 先移除视口外的（跳过播放中当前照片）
+      for (var i = 0; i < photos.length; i++) {
+        var q = photos[i];
+        if (!q.marker) continue;
+        if (q.el === player.activeEl) continue;   // 播放中保留
+        if (!bounds.contains([q.gLat, q.gLng])) {
+          thumbLayer.removeLayer(q.marker);
+          disposeThumbMarker(q);
+        }
+      }
+
+      // 收集需要新增的
+      var toAdd = [];
+      for (var j = 0; j < photos.length; j++) {
+        var p = photos[j];
+        if (p.marker) continue;
+        if (bounds.contains([p.gLat, p.gLng])) toAdd.push(p);
+      }
+      // 分批创建，避免单帧卡顿
+      var k = 0;
+      function batch() {
+        var n = 0;
+        while (k < toAdd.length && n < RENDER_BATCH) {
+          var pp = toAdd[k++];
+          if (pp.marker) continue;
+          createThumbMarker(pp);
+          thumbLayer.addLayer(pp.marker);
+          n++;
+        }
+        if (k < toAdd.length) requestAnimationFrame(batch);
+      }
+      batch();
+    } else {
+      /* —— 圆点模式 —— */
+      if (map.hasLayer(thumbLayer)) {
+        thumbLayer.clearLayers();
+        for (var m = 0; m < photos.length; m++) disposeThumbMarker(photos[m]);
+      }
+      // 始终为缺失的照片创建圆点并加入 dotLayer（支持增量加载）
+      for (var n = 0; n < photos.length; n++) {
+        var pp = photos[n];
+        if (!pp.dot) { createDotMarker(pp); dotLayer.addLayer(pp.dot); }
+        else if (!dotLayer.hasLayer(pp.dot)) dotLayer.addLayer(pp.dot);
+      }
+      if (!map.hasLayer(dotLayer)) map.addLayer(dotLayer);
+      // 播放中：为当前照片叠加临时缩略图
+      syncPlayerThumb();
+    }
+  }
+
+  /* 播放时确保当前照片有可交互的缩略图 marker */
+  function ensurePlayerMarker(p) {
+    if (p.marker && p.el) return;
+    createThumbMarker(p);
+    if (map.getZoom() >= ZOOM_THUMB) {
+      thumbLayer.addLayer(p.marker);
+    } else {
+      p.marker.addTo(map);
+      playerThumb = p.marker;
+    }
+  }
+
+  /* 释放上一张照片的播放 marker（仅 dot 模式下的临时 marker 需销毁） */
+  function releasePlayerMarker(p) {
+    if (!p) return;
+    if (playerThumb && playerThumb === p.marker) {
+      map.removeLayer(p.marker);
+      disposeThumbMarker(p);
+      playerThumb = null;
+    }
+  }
+
+  /* dot 模式下为播放当前照片同步临时缩略图 */
+  function syncPlayerThumb() {
+    if (!player.running || player.idx >= player.list.length) { clearPlayerThumb(); return; }
+    var p = player.list[player.idx];
+    if (playerThumb && playerThumb.__p === p) return;
+    clearPlayerThumb();
+    createThumbMarker(p);
+    p.el.classList.add('active');
+    p.el.style.setProperty('--s', currentScale() * 2);
+    p.marker.setZIndexOffset(2000);
+    p.el.classList.remove('shake');
+    void p.el.offsetWidth;
+    p.el.classList.add('shake');
+    p.marker.addTo(map);
+    p.marker.__p = p;
+    playerThumb = p.marker;
+    player.activeEl = p.el;
+    player.activeMk = p.marker;
+  }
+
+  function clearPlayerThumb() {
+    if (!playerThumb) return;
+    var p = playerThumb.__p;
+    if (p && p.el) p.el.classList.remove('active', 'shake');
+    if (p && p.marker) p.marker.setZIndexOffset(0);
+    map.removeLayer(playerThumb);
+    if (p) disposeThumbMarker(p);
+    playerThumb = null;
   }
 
   function updateAllScales() {
-    var s = currentScale();
-    for (var i = 0; i < photos.length; i++) {
-      var p = photos[i];
-      if (!p.el) continue;
-      // 播放规则叠加：正在播放的点位始终是当前比例的 2 倍
-      var mul = (p.el === player.activeEl) ? 2 : 1;
-      p.el.style.setProperty('--s', s * mul);
-    }
+    if (scaleRaf) return;
+    scaleRaf = requestAnimationFrame(function () {
+      scaleRaf = 0;
+      var s = currentScale();
+      for (var i = 0; i < photos.length; i++) {
+        var p = photos[i];
+        if (!p.el) continue;
+        // 播放规则叠加：正在播放的点位始终是当前比例的 2 倍
+        var mul = (p.el === player.activeEl) ? 2 : 1;
+        p.el.style.setProperty('--s', s * mul);
+      }
+    });
   }
 
   /* ============================================================
@@ -888,20 +1088,26 @@
     if (player.idx >= player.list.length) { stopPlay(true); return; }
 
     var p = player.list[player.idx];
-    // 上一个恢复原比例
-    if (player.activeEl) {
-      player.activeEl.classList.remove('active', 'shake');
-      player.activeEl.style.setProperty('--s', currentScale());
+    // 上一张恢复原比例
+    var prev = player.list[player.idx - 1];
+    if (player.activeEl && prev && prev.el) {
+      prev.el.classList.remove('active', 'shake');
+      prev.el.style.setProperty('--s', currentScale());
     }
-    if (player.activeMk) player.activeMk.setZIndexOffset(0);
+    if (player.activeMk && player.activeMk !== playerThumb) {
+      player.activeMk.setZIndexOffset(0);
+    }
+    // 释放 dot 模式下上一张的临时缩略图
+    if (prev) releasePlayerMarker(prev);
 
-    // 当前：抖动 + 放大到当前比例的 2 倍
+    // 当前：确保有 marker（thumb 模式视口外被裁剪 / dot 模式无 el 时会自动创建），再高亮
+    ensurePlayerMarker(p);
     if (p.el) {
       player.activeEl = p.el;
       player.activeMk = p.marker;
       p.el.classList.add('active');
       p.el.style.setProperty('--s', currentScale() * 2);
-      p.marker.setZIndexOffset(2000);
+      if (p.marker) p.marker.setZIndexOffset(2000);
       p.el.classList.remove('shake');
       void p.el.offsetWidth;   // 重新触发抖动动画
       p.el.classList.add('shake');
@@ -939,11 +1145,16 @@
     player.running = false;
     player.paused = false;
     clearTimeout(player.timer);
-    if (player.activeEl) {
-      player.activeEl.classList.remove('active', 'shake');
-      player.activeEl = null;
+    var cur = (player.idx < player.list.length) ? player.list[player.idx] : null;
+    if (player.activeEl && cur && cur.el) {
+      cur.el.classList.remove('active', 'shake');
     }
-    if (player.activeMk) { player.activeMk.setZIndexOffset(0); player.activeMk = null; }
+    if (player.activeMk && player.activeMk !== playerThumb) {
+      player.activeMk.setZIndexOffset(0);
+    }
+    clearPlayerThumb();   // 清理 dot 模式下的临时缩略图
+    player.activeEl = null;
+    player.activeMk = null;
     updateAllScales();
     hide($('playHud'));
     if (finished) toast('播放结束，共 ' + player.list.length + ' 个点位');
@@ -1228,6 +1439,7 @@
         if (r.added) {
           updateStat();
           if (r.newOnes && r.newOnes.length) fitToPhotos(r.newOnes);
+          scheduleRender();   // 显式触发渲染
           toast('已自动加载同目录 photos.db：' + r.added + ' 张照片', 8000);
         }
       });

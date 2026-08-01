@@ -14,6 +14,7 @@ photos_*.db
 *.bak
 *.bak.html
 *.tmp
+*.zip
 
 # IDE / 编辑器
 .vscode/
