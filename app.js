@@ -34,7 +34,7 @@
   var saveDirHandle = null;     // 保存目录句柄（File System Access API）
 
   var viewerOpen = false, viewerUrl = null, viewerOwnerEl = null;
-  var player = { running: false, paused: false, idx: 0, list: [], timer: null, speed: 1, activeEl: null, activeMk: null };
+  var player = { running: false, paused: false, idx: 0, list: [], listSet: null, timer: null, speed: 1, activeEl: null, activeMk: null };
 
   /* 渲染层：高缩放用 thumbLayer(divIcon 缩略图 + 视口裁剪)，低缩放用 dotLayer(Canvas 圆点) */
   var thumbLayer = null, dotLayer = null, dotRenderer = null;
@@ -756,6 +756,8 @@
   function createThumbMarker(p) {
     var el = document.createElement('div');
     el.className = 'pm' + (p.approxTime ? ' no-time' : '');
+    // 播放中且不在本次播放列表：标记为 out（橙色边框 + 降低不透明度）
+    if (player.running && player.listSet && !player.listSet[p.hash]) el.classList.add('pm-out');
     el.style.setProperty('--s', currentScale());
 
     var wob = document.createElement('span');
@@ -794,12 +796,14 @@
 
   /* 创建 Canvas 圆点 marker（低缩放模式用，共享一个 canvas，性能极佳） */
   function createDotMarker(p) {
+    // 播放中：本次播放的蓝色，非本次播放的橙色
+    var inPlay = !(player.running && player.listSet && !player.listSet[p.hash]);
     var dot = L.circleMarker([p.gLat, p.gLng], {
       renderer: dotRenderer,
       radius: 4,
       weight: 1,
       color: '#ffffff',
-      fillColor: '#2b6cff',
+      fillColor: inPlay ? '#2b6cff' : '#ff9500',
       fillOpacity: 0.85,
       interactive: true
     });
@@ -957,17 +961,28 @@
    * 六、大图查看器（悬停/点按弹出，不遮死底图）
    * ============================================================ */
   var viewerDom = null;
+  var viewerPhoto = null;    // 当前查看器打开的照片对象
   var dismissBound = false;
 
   function buildViewer() {
     var box = document.createElement('div');
     box.id = 'viewer';
-    box.innerHTML = '<div class="frame"><img id="viewerImg" alt=""></div><div id="viewerMeta"></div>';
+    box.innerHTML =
+      '<div class="frame">' +
+        '<button class="viewer-del" id="viewerDelBtn" title="删除" aria-label="删除">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>' +
+        '</button>' +
+        '<img id="viewerImg" alt="">' +
+      '</div>' +
+      '<div id="viewerMeta"></div>';
     document.body.appendChild(box);
     return { box: box };
   }
 
   function dismissHandler(e) {
+    // 点击删除按钮不关闭
+    if (e.target && e.target.closest && e.target.closest('#viewerDelBtn')) return;
+    // 点击照片标记本身不关闭
     if (viewerOwnerEl && e.target && e.target.closest && e.target.closest('.pm') === viewerOwnerEl) return;
     closeViewer();
   }
@@ -992,7 +1007,14 @@
     else show(viewerDom.box);
     viewerOpen = true;
     viewerOwnerEl = ownerEl || null;
+    viewerPhoto = p;   // 保存引用用于删除
     bindDismiss();
+
+    // 绑定删除按钮（每次打开绑定，防止闭包残留）
+    $('viewerDelBtn').addEventListener('click', function (ev) {
+      ev.stopPropagation();   // 阻止冒泡，避免触发 dismissHandler
+      openDelModal();
+    });
 
     var img = $('viewerImg');
     var meta = $('viewerMeta');
@@ -1024,9 +1046,68 @@
     if (!viewerOpen || !viewerDom) return;
     viewerOpen = false;
     viewerOwnerEl = null;
+    viewerPhoto = null;   // 清空引用
+    hideDelModal();       // 关闭可能残留的确认框
     unbindDismiss();
     hide(viewerDom.box);
     if (viewerUrl) { URL.revokeObjectURL(viewerUrl); viewerUrl = null; }
+  }
+
+  /* 删除确认框与逻辑 */
+  function openDelModal() {
+    show($('delModal'));
+  }
+  function hideDelModal() {
+    hide($('delModal'));
+  }
+
+  function deleteCurrentPhoto() {
+    if (!viewerPhoto || !db) return;
+    var p = viewerPhoto;
+
+    // 1. 从数据库删除
+    try {
+      db.run('DELETE FROM photos WHERE hash = ?', [p.hash]);
+    } catch (e) {
+      console.warn('删除数据库记录失败', e);
+      toast('删除失败：' + (e.message || e), 3000);
+      return;
+    }
+
+    // 2. 从地图图层移除 marker
+    if (p.marker) {
+      if (map.hasLayer(thumbLayer)) thumbLayer.removeLayer(p.marker);
+      if (p.marker && map.hasLayer(p.marker)) map.removeLayer(p.marker);
+    }
+    if (p.dot && map.hasLayer(dotLayer)) dotLayer.removeLayer(p.dot);
+
+    // 3. 从内存数据结构移除
+    var idx = photos.indexOf(p);
+    if (idx >= 0) photos.splice(idx, 1);
+    if (hashSet[p.hash]) delete hashSet[p.hash];
+
+    // 4. 如果正在播放且删除的是当前照片
+    if (player.running && player.list[player.idx] === p) {
+      stopPlay(false);
+    } else if (player.running) {
+      // 如果删除的是播放列表中的其他照片，从列表中移除并更新索引
+      var pIdxInList = player.list.indexOf(p);
+      if (pIdxInList >= 0) {
+        player.list.splice(pIdxInList, 1);
+        if (pIdxInList < player.idx) player.idx--;
+        if (player.listSet) delete player.listSet[p.hash];   // 同步清理播放集合
+      }
+    }
+
+    // 5. 关闭 viewer 并刷新
+    closeViewer();
+    updateStat();
+    scheduleRender();
+
+    // 6. 立即保存到文件
+    saveData();
+
+    toast('已删除', 2000);
   }
 
   /* ============================================================
@@ -1050,8 +1131,13 @@
   function openPlayModal() {
     var tr = photoTimeRange();
     if (!tr.list.length) { toast('还没有可播放的照片，请先导入或加载数据'); return; }
-    $('playStart').value = toLocalInput(tr.min);
-    $('playEnd').value = toLocalInput(tr.max + 60000);
+    // 优先使用上次缓存的播放区间，无缓存则用全范围
+    var cachedS = localStorage.getItem('pw_playStart');
+    var cachedE = localStorage.getItem('pw_playEnd');
+    if (cachedS) $('playStart').value = cachedS;
+    else $('playStart').value = toLocalInput(tr.min);
+    if (cachedE) $('playEnd').value = cachedE;
+    else $('playEnd').value = toLocalInput(tr.max + 60000);
     updatePlayHint();
     show($('playModal'));
   }
@@ -1069,15 +1155,28 @@
 
     if (!list.length) { toast('该时间范围内没有照片'); return; }
 
+    // 缓存本次播放时间区间，下次打开自动带入
+    try {
+      localStorage.setItem('pw_playStart', s);
+      localStorage.setItem('pw_playEnd', e);
+    } catch (err) { /* 隐私模式可能禁用 localStorage，忽略 */ }
+
     hide($('playModal'));
     closeViewer();
     player.running = true;
     player.paused = false;
     player.idx = 0;
     player.list = list;
+    // 构建 hash 集合用于播放/非播放点位区分
+    player.listSet = Object.create(null);
+    for (var i = 0; i < list.length; i++) player.listSet[list[i].hash] = true;
     player.speed = speed;
+    applyPlayStyles();   // 非播放点位降级显示
     show($('playHud'));
     setHudIcon(true);
+    // 初始化 HUD 控件状态
+    $('hudSpeed').value = String(speed);
+    $('hudSeek').value = 0;
     tickPlay();
   }
 
@@ -1119,6 +1218,8 @@
     $('hudTime').textContent = (p.approxTime ? '≈ ' : '') + fmtTime(p.takenTs) +
       '　·　' + (player.idx + 1) + ' / ' + player.list.length;
     $('hudBar').style.width = ((player.idx + 1) / player.list.length * 100) + '%';
+    // 同步进度条手柄位置（程序化设置 value 不触发 input 事件，安全）
+    $('hudSeek').value = Math.round(player.idx / Math.max(1, player.list.length - 1) * 100);
 
     player.timer = setTimeout(function () {
       if (!player.running || player.paused) return;
@@ -1145,6 +1246,7 @@
     player.running = false;
     player.paused = false;
     clearTimeout(player.timer);
+    var total = player.list.length;   // 先记录，下面要清空
     var cur = (player.idx < player.list.length) ? player.list[player.idx] : null;
     if (player.activeEl && cur && cur.el) {
       cur.el.classList.remove('active', 'shake');
@@ -1155,9 +1257,35 @@
     clearPlayerThumb();   // 清理 dot 模式下的临时缩略图
     player.activeEl = null;
     player.activeMk = null;
+    player.list = [];
+    player.listSet = null;   // 清空播放集合，恢复所有点位为蓝色
+    clearPlayStyles();       // 恢复所有点位为默认蓝色
     updateAllScales();
     hide($('playHud'));
-    if (finished) toast('播放结束，共 ' + player.list.length + ' 个点位');
+    if (finished) toast('播放结束，共 ' + total + ' 个点位');
+  }
+
+  /* 播放起止时批量更新点位样式：本次播放保持蓝色，非本次降为橙色 */
+  function applyPlayStyles() {
+    if (!player.listSet) return;
+    for (var i = 0; i < photos.length; i++) {
+      var p = photos[i];
+      var inPlay = !!player.listSet[p.hash];
+      if (p.dot) {
+        p.dot.setStyle({ fillColor: inPlay ? '#2b6cff' : '#ff9500' });
+      }
+      if (p.el) {
+        if (inPlay) p.el.classList.remove('pm-out');
+        else p.el.classList.add('pm-out');
+      }
+    }
+  }
+  function clearPlayStyles() {
+    for (var i = 0; i < photos.length; i++) {
+      var p = photos[i];
+      if (p.dot) p.dot.setStyle({ fillColor: '#2b6cff' });
+      if (p.el) p.el.classList.remove('pm-out');
+    }
   }
 
   /* ============================================================
@@ -1246,8 +1374,60 @@
       if (e.target === this) hide(this);
     });
 
+    // 删除确认框绑定
+    $('delCancel').addEventListener('click', function () {
+      hideDelModal();
+    });
+    $('delConfirm').addEventListener('click', function () {
+      hideDelModal();
+      deleteCurrentPhoto();
+    });
+    $('delModal').addEventListener('click', function (e) {
+      if (e.target === this) hideDelModal();
+    });
+
     $('hudStop').addEventListener('click', function () { stopPlay(false); });
     $('hudToggle').addEventListener('click', pausePlay);
+
+    // 播放速度实时调整：下次 tick 自动用新速度，当前等待的 tick 也按新速度重排
+    $('hudSpeed').addEventListener('change', function () {
+      player.speed = parseFloat(this.value) || 1;
+      if (player.running && !player.paused) {
+        clearTimeout(player.timer);
+        player.timer = setTimeout(function () {
+          if (!player.running || player.paused) return;
+          player.idx++;
+          tickPlay();
+        }, interval());
+      }
+    });
+
+    // 进度条拖动：input 期间实时预览目标位置信息并暂停自动前进；change 跳转到目标
+    $('hudSeek').addEventListener('input', function () {
+      if (!player.running) return;
+      clearTimeout(player.timer);   // 拖动期间暂停自动前进，避免覆盖用户操作
+      var max = player.list.length - 1;
+      var idx = Math.round(parseInt(this.value, 10) / 100 * max);
+      var p = player.list[idx];
+      if (p) {
+        $('hudName').textContent = p.name;
+        $('hudTime').textContent = (p.approxTime ? '≈ ' : '') + fmtTime(p.takenTs) +
+          '　·　' + (idx + 1) + ' / ' + player.list.length;
+        $('hudBar').style.width = ((idx + 1) / player.list.length * 100) + '%';
+      }
+    });
+    $('hudSeek').addEventListener('change', function () {
+      if (!player.running) return;
+      var max = player.list.length - 1;
+      var idx = Math.max(0, Math.min(Math.round(parseInt(this.value, 10) / 100 * max), max));
+      // 清理当前高亮
+      var cur = player.list[player.idx];
+      if (player.activeEl && cur && cur.el) cur.el.classList.remove('active', 'shake');
+      if (player.activeMk && player.activeMk !== playerThumb) player.activeMk.setZIndexOffset(0);
+      if (cur) releasePlayerMarker(cur);
+      player.idx = idx;
+      tickPlay();   // 重新高亮目标位置并按当前速度/暂停状态调度
+    });
 
     // 【离线下载已禁用】以下 UI 接线注释保留，代码不启用
     // $('btnOffline').addEventListener('click', openOfflineModal);

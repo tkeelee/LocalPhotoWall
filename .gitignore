@@ -5,8 +5,7 @@
 .LSOverride
 
 # 数据库文件（含照片数据，体积大且含个人隐私，不入库）
-photos.db
-photos_*.db
+*.db
 *.sqlite
 *.sqlite3
 
