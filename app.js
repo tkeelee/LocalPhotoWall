@@ -454,6 +454,21 @@
   }
 
   /** 从字节载入数据库并合并（分批处理，避免大数据集卡死主线程） */
+  /* 从内存 photos 移除指定 hash 的照片并清理其 marker/dot（用于"后载入为准"覆盖）*/
+  function removePhotoEntry(hash) {
+    for (var i = 0; i < photos.length; i++) {
+      if (photos[i].hash === hash) {
+        var old = photos[i];
+        if (old.marker) { try { thumbLayer.removeLayer(old.marker); } catch (e) {} disposeThumbMarker(old); }
+        if (old.dot) { try { dotLayer.removeLayer(old.dot); } catch (e) {} old.dot = null; }
+        if (old.el === player.activeEl) { player.activeEl = null; }
+        photos.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+
   function loadDbBytes(bytes) {
     return loadSqlJs().then(function () {
       var loaded = new SQL.Database(new Uint8Array(bytes));
@@ -469,8 +484,9 @@
       var rows = (res && res[0]) ? res[0].values : [];
       loaded.close();
 
-      var stat = { added: 0, skipped: 0, noGeo: 0, newOnes: [] };
+      var stat = { added: 0, updated: 0, noGeo: 0, newOnes: [] };
       // 分批处理：每批 LOAD_BATCH 行，批间让出主线程，保持 UI 响应
+      // 哈希冲突时"后载入为准"：移除旧 photos 项与 db 行，重新插入新数据
       function chunk(start) {
         var end = Math.min(start + LOAD_BATCH, rows.length);
         for (var i = start; i < end; i++) {
@@ -481,17 +497,24 @@
             thumb: r[11], tw: r[12] || THUMB_MAX, th: r[13] || THUMB_MAX,
             file: null, fromDb: true
           };
-          if (hashSet[p.hash]) { stat.skipped++; continue; }
-          hashSet[p.hash] = true;
+          var conflict = !!hashSet[p.hash];
+          if (conflict) {
+            // 后载入为准：移除旧内存项与 db 行，后续按新数据重新插入
+            removePhotoEntry(p.hash);
+            try { db.run('DELETE FROM photos WHERE hash=?', [p.hash]); } catch (e2) {}
+            stat.updated++;
+          } else {
+            hashSet[p.hash] = true;
+          }
           if (p.lat == null || p.lng == null) { stat.noGeo++; continue; }
           insertPhoto(p);
           preparePhoto(p);   // 只算坐标，不创建 marker（由 renderVisible 按需创建）
           photos.push(p);
           stat.newOnes.push(p);
-          stat.added++;
+          if (!conflict) stat.added++;
         }
         if (end < rows.length) {
-          progress('正在加载数据库', end, rows.length, '已解析 ' + stat.added + ' 张');
+          progress('正在加载数据库', end, rows.length, '已解析 ' + (stat.added + stat.updated) + ' 张');
           return new Promise(function (resolve) { setTimeout(resolve, 0); }).then(function () {
             return chunk(end);
           });
@@ -695,13 +718,15 @@
     markDirty();   // 加载后标记脏数据，显示保存按钮
     // 显式触发渲染：同区域增量加载时 fitToPhotos 可能不触发 moveend
     scheduleRender();
-    var total = r.added + r.skipped + r.noGeo;
+    var total = r.added + r.updated + r.noGeo;
     var msg = '共加载 ' + total + ' 张';
     var ext = [];
-    if (r.skipped) ext.push(r.skipped + ' 张重复（根据哈希值判断）');
+    if (r.updated) ext.push(r.updated + ' 张哈希重复已覆盖（后载入为准）');
     if (r.noGeo) ext.push(r.noGeo + ' 张未提取到经纬度');
     if (ext.length) msg += '，' + ext.join('，');
-    msg += '，实际导入 ' + r.added + ' 张。';
+    msg += '，实际导入 ' + r.added + ' 张';
+    if (r.updated) msg += '、覆盖 ' + r.updated + ' 张';
+    msg += '。';
     toast(msg, 8000);
   }
 
@@ -776,7 +801,7 @@
     var marker = L.marker([p.gLat, p.gLng], { icon: icon, riseOnHover: true });
 
     el.addEventListener('mouseenter', function () { if (!isMobile) openViewer(p, el); });
-    el.addEventListener('mouseleave', function () { if (!isMobile && viewerOpen) closeViewer(); });
+    el.addEventListener('mouseleave', function () { if (!isMobile && viewerOpen) scheduleViewerClose(); });
     el.addEventListener('click', function (ev) {
       ev.stopPropagation();
       if (viewerOpen && viewerOwnerEl === el) { closeViewer(); return; }
@@ -963,12 +988,17 @@
   var viewerDom = null;
   var viewerPhoto = null;    // 当前查看器打开的照片对象
   var dismissBound = false;
+  var viewerCloseTimer = null;  // hover 延迟关闭计时器
+  var VIEWER_HOVER_DELAY = 220;
 
   function buildViewer() {
     var box = document.createElement('div');
     box.id = 'viewer';
     box.innerHTML =
       '<div class="frame">' +
+        '<button class="viewer-edit" id="viewerEditBtn" title="编辑文件名/路径" aria-label="编辑">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>' +
+        '</button>' +
         '<button class="viewer-del" id="viewerDelBtn" title="删除" aria-label="删除">' +
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>' +
         '</button>' +
@@ -976,14 +1006,35 @@
       '</div>' +
       '<div id="viewerMeta"></div>';
     document.body.appendChild(box);
+    // 鼠标进入预览框/元信息区：取消延迟关闭，允许操作按钮与选中文字
+    // 鼠标离开：启动延迟关闭（220ms 后关闭，留出从缩略图移向大图的时间）
+    function bindHover(el) {
+      el.addEventListener('mouseenter', cancelViewerClose);
+      el.addEventListener('mouseleave', function () { if (viewerOpen) scheduleViewerClose(); });
+    }
+    bindHover(box.querySelector('.frame'));
+    bindHover(box.querySelector('#viewerMeta'));
     return { box: box };
   }
 
+  function scheduleViewerClose() {
+    cancelViewerClose();
+    viewerCloseTimer = setTimeout(function () {
+      viewerCloseTimer = null;
+      if (viewerOpen) closeViewer();
+    }, VIEWER_HOVER_DELAY);
+  }
+  function cancelViewerClose() {
+    if (viewerCloseTimer) { clearTimeout(viewerCloseTimer); viewerCloseTimer = null; }
+  }
+
   function dismissHandler(e) {
-    // 点击删除按钮不关闭
-    if (e.target && e.target.closest && e.target.closest('#viewerDelBtn')) return;
+    // 点击编辑/删除按钮不关闭
+    if (e.target && e.target.closest && e.target.closest('#viewerDelBtn,#viewerEditBtn')) return;
     // 点击照片标记本身不关闭
     if (viewerOwnerEl && e.target && e.target.closest && e.target.closest('.pm') === viewerOwnerEl) return;
+    // 点击预览框（图片/按钮）或元信息区不关闭，允许选中文字与操作按钮
+    if (e.target && e.target.closest && e.target.closest('.frame,#viewerMeta')) return;
     closeViewer();
   }
   function bindDismiss() {
@@ -1016,6 +1067,12 @@
       openDelModal();
     });
 
+    // 绑定编辑按钮
+    $('viewerEditBtn').addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      openViewerEditor();
+    });
+
     var img = $('viewerImg');
     var meta = $('viewerMeta');
     var warn = '';
@@ -1044,6 +1101,7 @@
 
   function closeViewer() {
     if (!viewerOpen || !viewerDom) return;
+    cancelViewerClose();
     viewerOpen = false;
     viewerOwnerEl = null;
     viewerPhoto = null;   // 清空引用
@@ -1059,6 +1117,87 @@
   }
   function hideDelModal() {
     hide($('delModal'));
+  }
+
+  /* 查看器内编辑：仅文件名/路径可改，其他只读 */
+  function openViewerEditor() {
+    var p = viewerPhoto;
+    if (!p) return;
+    var meta = $('viewerMeta');
+    meta.innerHTML =
+      '<div class="ve-form">' +
+        '<div class="ve-row"><label>文件名</label><input id="veName" type="text" value="' + escapeAttr(p.name || '') + '"></div>' +
+        '<div class="ve-row"><label>照片路径</label><input id="vePath" type="text" value="' + escapeAttr(p.path || '') + '"></div>' +
+        '<div class="ve-row"><label>经纬度</label><input class="ro" type="text" value="' + (p.lat != null ? Number(p.lat).toFixed(6) + ', ' + Number(p.lng).toFixed(6) : '') + '" readonly></div>' +
+        '<div class="ve-row"><label>拍摄时间</label><input class="ro" type="text" value="' + escapeAttr(fmtTime(p.takenTs) || '') + '" readonly></div>' +
+        '<div class="ve-row"><label>尺寸</label><input class="ro" type="text" value="' + (p.width || '') + '×' + (p.height || '') + (p.size ? ' · ' + fmtSize(p.size) : '') + '" readonly></div>' +
+        '<div class="ve-actions">' +
+          '<button class="ve-cancel" id="veCancel">取消</button>' +
+          '<button class="ve-save" id="veSave">保存</button>' +
+        '</div>' +
+      '</div>';
+    $('veCancel').addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      renderViewerMeta(p);
+    });
+    $('veSave').addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      saveViewerEdit(p);
+    });
+    var nameInput = $('veName');
+    nameInput.focus();
+    nameInput.select();
+  }
+
+  function saveViewerEdit(p) {
+    var newName = $('veName').value.trim();
+    var newPath = $('vePath').value.trim();
+    if (!newName) { toast('文件名不能为空'); return; }
+    if (newName === (p.name || '') && newPath === (p.path || '')) {
+      renderViewerMeta(p);
+      toast('无修改');
+      return;
+    }
+    if (!db) { toast('数据库未加载，无法保存'); return; }
+    try {
+      db.run('UPDATE photos SET name=?, path=? WHERE hash=?', [newName, newPath, p.hash]);
+    } catch (e) {
+      toast('保存失败：' + (e.message || e), 8000);
+      return;
+    }
+    p.name = newName;
+    p.path = newPath;
+    dbDirty = true;
+    // 同步内存 photos 对应项（viewerPhoto 就是 photos 中的引用，已原地更新）
+    if (p.el) {
+      // 若缩略图标记的 title 依赖 name，刷新一下
+      var titleEl = p.el.querySelector('.pm-title');
+      if (titleEl) titleEl.textContent = newName;
+    }
+    saveData();
+    renderViewerMeta(p);
+    toast('已保存修改');
+  }
+
+  /* 用照片数据重新渲染 viewerMeta（取消编辑或保存后恢复显示）*/
+  function renderViewerMeta(p) {
+    var meta = $('viewerMeta');
+    var warn = (!p.file && p.fromDb) ? '<div class="warn">原图不在本机 · 缩略图已放大 ' + FALLBACK_UPSCALE + ' 倍显示</div>' : '';
+    // 判断当前是否为缩略图放大模式
+    var img = $('viewerImg');
+    if (!p.file) warn = '<div class="warn">原图不在本机 · 缩略图已放大 ' + FALLBACK_UPSCALE + ' 倍显示</div>';
+    else warn = '';
+    meta.innerHTML =
+      '<div class="n">' + escapeHtml(p.name) + '</div>' +
+      '<div class="s">' + (p.approxTime ? '≈ ' : '') + fmtTime(p.takenTs) +
+      '　' + p.lat.toFixed(6) + ', ' + p.lng.toFixed(6) +
+      (p.size ? '　' + fmtSize(p.size) : '') + '</div>' +
+      (p.path && p.path !== p.name ? '<div class="s">' + escapeHtml(p.path) + '</div>' : '') +
+      warn;
+  }
+
+  function escapeAttr(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   function deleteCurrentPhoto() {
@@ -1289,7 +1428,713 @@
   }
 
   /* ============================================================
-   * 八、事件绑定
+   * 八、数据库直接管理（预览 / 行内编辑 / 导入 CSV / 导出 CSV）
+   * ============================================================ */
+  var dbMgr = {
+    mode: 'memory',        // 'memory' = 当前主 db；'file' = 外部 db 文件
+    fileDb: null,           // file 模式下的 SQL.Database
+    fileHandle: null,       // file 模式下的 FileSystemFileHandle
+    fileName: '',           // file 模式文件名
+    rows: [],               // 当前展示行（全量，未过滤）{hash,name,path,...,_edit:{name,path}}
+    filtered: [],           // 筛选后的行
+    selHash: null,          // 选中行 hash
+    dirty: false,           // 是否有未保存编辑
+    page: 0,                // 当前页（0-based）
+    pageSize: 10,           // 每页条数（PC 10 / 手机 5）
+    filterFrom: null,       // 筛选起始时间戳
+    filterTo: null          // 筛选结束时间戳
+  };
+  var DB_COLUMNS = ['hash','name','path','taken_at','taken_ts','lat','lng','alt','width','height','size','thumb','thumb_w','thumb_h','imported_at'];
+
+  function openDbManage() {
+    dbMgr.mode = 'memory';
+    dbMgr.fileDb = null;
+    dbMgr.fileHandle = null;
+    dbMgr.fileName = '';
+    dbMgr.selHash = null;
+    dbMgr.dirty = false;
+    dbMgr.page = 0;
+    dbMgr.pageSize = window.innerWidth <= 760 ? 5 : 10;
+    dbMgr.filterFrom = null;
+    dbMgr.filterTo = null;
+    hide($('dbResult'));
+    $('dbFilterFrom').value = '';
+    $('dbFilterTo').value = '';
+    ensureDb().then(function () {
+      dbMgr.rows = queryDbRows(db);
+      applyFilter();
+      updateFilterInfo();
+      $('dbManageSource').textContent = '数据来源：当前内存数据库（' + dbMgr.rows.length + ' 行，编辑保存后写回项目目录）';
+      renderDbTable();
+      hide($('dbDetail'));
+      show($('dbManageModal'));
+    }).catch(function (e) {
+      toast('数据库引擎不可用：' + (e.message || e), 8000);
+    });
+  }
+
+  function queryDbRows(target) {
+    var res = target.exec('SELECT hash,name,path,taken_at,taken_ts,lat,lng,alt,width,height,size,thumb,thumb_w,thumb_h,imported_at FROM photos');
+    var rows = [];
+    if (res && res[0]) {
+      var vals = res[0].values;
+      for (var i = 0; i < vals.length; i++) {
+        var r = vals[i];
+        rows.push({
+          hash: r[0], name: r[1], path: r[2], taken_at: r[3], taken_ts: r[4],
+          lat: r[5], lng: r[6], alt: r[7], width: r[8], height: r[9], size: r[10],
+          thumb: r[11], thumb_w: r[12], thumb_h: r[13], imported_at: r[14],
+          _edit: {}
+        });
+      }
+    }
+    return rows;
+  }
+
+  function applyFilter() {
+    var rows = dbMgr.rows;
+    if (dbMgr.filterFrom != null || dbMgr.filterTo != null) {
+      rows = rows.filter(function (r) {
+        if (r.taken_ts == null) return false;
+        if (dbMgr.filterFrom != null && r.taken_ts < dbMgr.filterFrom) return false;
+        if (dbMgr.filterTo != null && r.taken_ts > dbMgr.filterTo) return false;
+        return true;
+      });
+    }
+    dbMgr.filtered = rows;
+    var totalPages = Math.max(1, Math.ceil(dbMgr.filtered.length / dbMgr.pageSize));
+    if (dbMgr.page >= totalPages) dbMgr.page = totalPages - 1;
+    if (dbMgr.page < 0) dbMgr.page = 0;
+  }
+
+  function updateFilterInfo() {
+    var info = $('dbFilterInfo');
+    if (dbMgr.filterFrom == null && dbMgr.filterTo == null) {
+      info.textContent = '全部（' + dbMgr.filtered.length + ' 条）';
+    } else {
+      var from = dbMgr.filterFrom != null ? fmtDate(dbMgr.filterFrom) : '最小';
+      var to = dbMgr.filterTo != null ? fmtDate(dbMgr.filterTo) : '最大';
+      info.textContent = from + ' ~ ' + to + '（' + dbMgr.filtered.length + ' 条）';
+    }
+  }
+
+  function fmtDate(ts) {
+    var d = new Date(ts);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function renderDbTable() {
+    var scroll = $('dbScroll');
+    if (!dbMgr.filtered.length) {
+      scroll.innerHTML = '<div class="db-empty">' + (dbMgr.rows.length ? '筛选后无数据' : '暂无数据') + '</div>';
+      hide($('dbPageRow'));
+      hide($('dbDetail'));
+      dbMgr.selHash = null;
+      return;
+    }
+    var totalPages = Math.max(1, Math.ceil(dbMgr.filtered.length / dbMgr.pageSize));
+    var start = dbMgr.page * dbMgr.pageSize;
+    var end = Math.min(start + dbMgr.pageSize, dbMgr.filtered.length);
+    var pageRows = dbMgr.filtered.slice(start, end);
+
+    var html = '<table><colgroup>' +
+      '<col class="col-thumb"><col class="col-hash"><col class="col-name"><col class="col-path">' +
+      '<col class="col-time"><col class="col-lat"><col class="col-lng"><col class="col-alt">' +
+      '<col class="col-w"><col class="col-h"><col class="col-size"><col class="col-ts"><col class="col-import">' +
+      '</colgroup><thead><tr>' +
+      '<th></th><th>哈希</th><th>文件名</th><th>照片路径</th><th>拍摄时间</th>' +
+      '<th>纬度</th><th>经度</th><th>海拔</th><th>宽</th><th>高</th>' +
+      '<th>大小</th><th>缩略图</th><th>导入时间</th>' +
+      '</tr></thead><tbody>';
+    for (var i = 0; i < pageRows.length; i++) {
+      var r = pageRows[i];
+      var sel = r.hash === dbMgr.selHash ? ' sel' : '';
+      var nameVal = r._edit.name != null ? r._edit.name : (r.name || '');
+      var pathVal = r._edit.path != null ? r._edit.path : (r.path || '');
+      html += '<tr data-hash="' + escapeHtml(r.hash) + '" class="' + sel.trim() + '">' +
+        '<td title="' + escapeHtml(r.name || '') + '">' + (r.thumb ? '<img class="thumb-cell" alt="" src="' + r.thumb + '">' : '') + '</td>' +
+        '<td class="hash-cell" title="' + escapeHtml(r.hash) + '">' + escapeHtml(r.hash) + '</td>' +
+        '<td class="cell-name"><span class="cell-text" title="' + escapeHtml(nameVal) + '">' + escapeHtml(nameVal) + '</span></td>' +
+        '<td class="cell-path"><span class="cell-text" title="' + escapeHtml(pathVal) + '">' + escapeHtml(pathVal) + '</span></td>' +
+        '<td title="' + escapeHtml(r.taken_at || '') + '">' + escapeHtml(r.taken_at || '') + '</td>' +
+        '<td>' + (r.lat != null ? Number(r.lat).toFixed(6) : '') + '</td>' +
+        '<td>' + (r.lng != null ? Number(r.lng).toFixed(6) : '') + '</td>' +
+        '<td>' + (r.alt != null ? Number(r.alt).toFixed(1) : '') + '</td>' +
+        '<td>' + (r.width || '') + '</td>' +
+        '<td>' + (r.height || '') + '</td>' +
+        '<td>' + fmtSize(r.size) + '</td>' +
+        '<td>' + (r.thumb_w || '') + '×' + (r.thumb_h || '') + '</td>' +
+        '<td title="' + escapeHtml(r.imported_at || '') + '">' + escapeHtml(r.imported_at || '') + '</td>' +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    scroll.innerHTML = html;
+
+    var trs = scroll.querySelectorAll('tbody tr');
+    for (var t = 0; t < trs.length; t++) {
+      (function (tr) {
+        tr.addEventListener('click', function () {
+          var prev = scroll.querySelector('tbody tr.sel');
+          if (prev && prev !== tr) prev.classList.remove('sel');
+          tr.classList.add('sel');
+          dbMgr.selHash = tr.getAttribute('data-hash');
+          renderDbDetail();
+        });
+        tr.querySelector('.cell-name').addEventListener('dblclick', function (e) {
+          e.stopPropagation();
+          startEditCell(tr, 'name');
+        });
+        tr.querySelector('.cell-path').addEventListener('dblclick', function (e) {
+          e.stopPropagation();
+          startEditCell(tr, 'path');
+        });
+      })(trs[t]);
+    }
+
+    renderPageRow(totalPages);
+  }
+
+  function renderPageRow(totalPages) {
+    var row = $('dbPageRow');
+    show(row);
+    if (totalPages <= 1) { hide(row); return; }
+    var cur = dbMgr.page + 1;
+    var html = '<button class="mini" id="dbPagePrev"' + (dbMgr.page <= 0 ? ' disabled' : '') + '>‹ 上一页</button>' +
+      '<span>第 <span class="cur">' + cur + '</span> / ' + totalPages + ' 页</span>' +
+      '<span style="margin-left:6px">共 ' + dbMgr.filtered.length + ' 条</span>' +
+      '<button class="mini" id="dbPageNext"' + (dbMgr.page >= totalPages - 1 ? ' disabled' : '') + '>下一页 ›</button>';
+    row.innerHTML = html;
+    $('dbPagePrev').addEventListener('click', function () {
+      if (dbMgr.page > 0) { dbMgr.page--; renderDbTable(); }
+    });
+    $('dbPageNext').addEventListener('click', function () {
+      if (dbMgr.page < totalPages - 1) { dbMgr.page++; renderDbTable(); }
+    });
+  }
+
+  function startEditCell(tr, field) {
+    var hash = tr.getAttribute('data-hash');
+    var r = null;
+    for (var i = 0; i < dbMgr.rows.length; i++) {
+      if (dbMgr.rows[i].hash === hash) { r = dbMgr.rows[i]; break; }
+    }
+    if (!r) return;
+    var cell = tr.querySelector('.cell-' + field);
+    var cur = r._edit[field] != null ? r._edit[field] : (r[field] || '');
+    var input = document.createElement('input');
+    input.className = 'cell-edit';
+    input.value = cur;
+    cell.innerHTML = '';
+    cell.appendChild(input);
+    input.focus();
+    input.select();
+    input.addEventListener('blur', function () {
+      r._edit[field] = input.value;
+      dbMgr.dirty = true;
+      renderDbTable();
+      renderDbDetail();
+    });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+      else if (e.key === 'Escape') { renderDbTable(); }
+    });
+  }
+
+  function renderDbDetail() {
+    if (!dbMgr.selHash) { hide($('dbDetail')); return; }
+    var r = null;
+    for (var i = 0; i < dbMgr.rows.length; i++) {
+      if (dbMgr.rows[i].hash === dbMgr.selHash) { r = dbMgr.rows[i]; break; }
+    }
+    if (!r) { hide($('dbDetail')); return; }
+    show($('dbDetail'));
+    var nameVal = r._edit.name != null ? r._edit.name : r.name;
+    var pathVal = r._edit.path != null ? r._edit.path : r.path;
+    $('dbDetail').innerHTML =
+      (r.thumb ? '<img alt="" src="' + r.thumb + '">' : '<div></div>') +
+      '<div class="hash-cell" title="' + escapeAttr(r.hash) + '"><b>哈希</b>' + escapeHtml(r.hash) + '</div>' +
+      '<div title="' + escapeAttr(nameVal || '') + '"><b>文件名</b>' + escapeHtml(nameVal || '') + '</div>' +
+      '<div title="' + escapeAttr(pathVal || '') + '"><b>路径</b>' + escapeHtml(pathVal || '') + '</div>' +
+      '<div><b>拍摄时间</b>' + escapeHtml(r.taken_at || '') + (r.taken_ts ? ' (ts ' + r.taken_ts + ')' : '') + '</div>' +
+      '<div><b>坐标</b>lat ' + (r.lat != null ? Number(r.lat).toFixed(6) : '') + ' / lng ' + (r.lng != null ? Number(r.lng).toFixed(6) : '') + ' / alt ' + (r.alt != null ? Number(r.alt).toFixed(1) : '') + '</div>' +
+      '<div><b>尺寸</b>' + (r.width || '') + '×' + (r.height || '') + ' · ' + fmtSize(r.size) + '</div>' +
+      '<div><b>缩略图</b>' + (r.thumb_w || '') + '×' + (r.thumb_h || '') + '</div>' +
+      '<div title="' + escapeAttr(r.imported_at || '') + '"><b>导入时间</b>' + escapeHtml(r.imported_at || '') + '</div>';
+  }
+
+  /* CSV 转义（RFC 4180）*/
+  function csvEscape(v) {
+    if (v == null) return '';
+    var s = String(v);
+    if (/[",\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  function exportDbCsv() {
+    if (!dbMgr.rows.length) { toast('没有数据可导出'); return; }
+    var lines = [DB_COLUMNS.join(',')];
+    for (var i = 0; i < dbMgr.rows.length; i++) {
+      var r = dbMgr.rows[i];
+      var line = [];
+      for (var j = 0; j < DB_COLUMNS.length; j++) {
+        var key = DB_COLUMNS[j];
+        var val = (key === 'name' && r._edit.name != null) ? r._edit.name :
+                  (key === 'path' && r._edit.path != null) ? r._edit.path :
+                  r[key];
+        line.push(csvEscape(val));
+      }
+      lines.push(line.join(','));
+    }
+    var blob = new Blob(['\ufeff' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (dbMgr.mode === 'file' ? dbMgr.fileName.replace(/\.db$/i, '') : 'photos') + '_' + tsName() + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    toast('已导出 ' + dbMgr.rows.length + ' 行 CSV');
+  }
+
+  /* CSV 解析（处理引号转义与 \r\n / \n / \r）*/
+  function parseCsv(text) {
+    text = text.replace(/^\ufeff/, '');
+    var rows = [];
+    var row = [];
+    var field = '';
+    var inQ = false;
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (inQ) {
+        if (c === '"') {
+          if (text[i + 1] === '"') { field += '"'; i++; }
+          else inQ = false;
+        } else field += c;
+      } else {
+        if (c === '"') inQ = true;
+        else if (c === ',') { row.push(field); field = ''; }
+        else if (c === '\r') {
+          row.push(field); field = '';
+          rows.push(row); row = [];
+          if (text[i + 1] === '\n') i++;
+        } else if (c === '\n') {
+          row.push(field); field = '';
+          rows.push(row); row = [];
+        } else field += c;
+      }
+    }
+    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+    return rows;
+  }
+
+  function importDbCsv(file) {
+    readBuffer(file).then(function (buf) {
+      var text = new TextDecoder('utf-8').decode(buf);
+      var rows = parseCsv(text);
+      if (!rows.length) { toast('CSV 为空'); return; }
+      var header = rows[0];
+      var idx = {};
+      for (var k = 0; k < header.length; k++) idx[String(header[k]).trim()] = k;
+      if (idx.hash == null) { toast('CSV 缺少 hash 列，无法覆盖'); return; }
+      var csvData = [];
+      for (var i = 1; i < rows.length; i++) {
+        var row = rows[i];
+        if (!row.length || (row.length === 1 && !row[0])) continue;
+        var obj = {};
+        for (var c = 0; c < DB_COLUMNS.length; c++) {
+          var key = DB_COLUMNS[c];
+          if (idx[key] != null && row[idx[key]] != null) obj[key] = row[idx[key]];
+        }
+        if (!obj.hash) continue;
+        ['taken_ts','width','height','size','thumb_w','thumb_h'].forEach(function (cc) {
+          if (obj[cc] != null && obj[cc] !== '') obj[cc] = parseInt(obj[cc], 10) || null;
+        });
+        ['lat','lng','alt'].forEach(function (cc) {
+          if (obj[cc] != null && obj[cc] !== '') obj[cc] = parseFloat(obj[cc]);
+          else obj[cc] = null;
+        });
+        csvData.push(obj);
+      }
+      if (!csvData.length) { toast('CSV 无有效数据行'); return; }
+      if (!window.confirm('将用 CSV 全量覆盖当前数据库（按哈希增/改/删），不可撤销，是否继续？')) return;
+      applyCsvOverwrite(csvData);
+    }).catch(function (e) { toast('读取 CSV 失败：' + (e.message || e), 8000); });
+  }
+
+  function applyCsvOverwrite(csvData) {
+    var target = dbMgr.mode === 'memory' ? db : dbMgr.fileDb;
+    if (!target) { toast('目标数据库未初始化'); return; }
+    var existing = queryDbRows(target);
+    var existMap = Object.create(null);
+    existing.forEach(function (r) { existMap[r.hash] = r; });
+    var csvMap = Object.create(null);
+    csvData.forEach(function (r) { csvMap[r.hash] = r; });
+
+    var toAdd = [], toUpdate = [], toDelete = [];
+    csvData.forEach(function (r) { if (existMap[r.hash]) toUpdate.push(r); else toAdd.push(r); });
+    existing.forEach(function (r) { if (!csvMap[r.hash]) toDelete.push(r.hash); });
+
+    try {
+      target.run('BEGIN');
+      for (var d = 0; d < toDelete.length; d++) {
+        target.run('DELETE FROM photos WHERE hash = ?', [toDelete[d]]);
+      }
+      for (var a = 0; a < toAdd.length; a++) {
+        var r = toAdd[a];
+        target.run(
+          'INSERT INTO photos(hash,name,path,taken_at,taken_ts,lat,lng,alt,width,height,size,thumb,thumb_w,thumb_h,imported_at)' +
+          ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          [r.hash, r.name || null, r.path || null, r.taken_at || null,
+           (r.taken_ts != null ? r.taken_ts : null),
+           (r.lat != null ? r.lat : null), (r.lng != null ? r.lng : null), (r.alt != null ? r.alt : null),
+           r.width || null, r.height || null, r.size || null, r.thumb || null,
+           r.thumb_w || null, r.thumb_h || null, r.imported_at || new Date().toISOString()]
+        );
+      }
+      for (var u = 0; u < toUpdate.length; u++) {
+        var ru = toUpdate[u];
+        target.run(
+          'UPDATE photos SET name=?,path=?,taken_at=?,taken_ts=?,lat=?,lng=?,alt=?,width=?,height=?,size=?,thumb=?,thumb_w=?,thumb_h=?,imported_at=? WHERE hash=?',
+          [ru.name || null, ru.path || null, ru.taken_at || null,
+           (ru.taken_ts != null ? ru.taken_ts : null),
+           (ru.lat != null ? ru.lat : null), (ru.lng != null ? ru.lng : null), (ru.alt != null ? ru.alt : null),
+           ru.width || null, ru.height || null, ru.size || null, ru.thumb || null,
+           ru.thumb_w || null, ru.thumb_h || null, ru.imported_at || new Date().toISOString(), ru.hash]
+        );
+      }
+      target.run('COMMIT');
+    } catch (e) {
+      try { target.run('ROLLBACK'); } catch (e2) {}
+      toast('导入失败：' + (e.message || e), 8000);
+      return;
+    }
+
+    if (dbMgr.mode === 'memory') {
+      dbDirty = true;
+      if (player.running) stopPlay(false);
+      closeViewer();
+      rebuildPhotosFromDb();
+      saveData();
+    } else {
+      persistFileDb();
+    }
+    dbMgr.rows = queryDbRows(target);
+    dbMgr.dirty = false;
+    dbMgr.selHash = null;
+    if (dbMgr.mode === 'file') {
+      $('dbManageSource').textContent = '数据来源：' + dbMgr.fileName + '（' + dbMgr.rows.length + ' 行，编辑保存后写回该文件）';
+    } else {
+      $('dbManageSource').textContent = '数据来源：当前内存数据库（' + dbMgr.rows.length + ' 行，编辑保存后写回项目目录）';
+    }
+    applyFilter();
+    updateFilterInfo();
+    renderDbTable();
+    hide($('dbDetail'));
+    showDbCsvResult(csvData.length, toAdd.length, toUpdate.length, toDelete.length);
+  }
+
+  function showDbCsvResult(total, added, updated, deleted) {
+    var el = $('dbResult');
+    el.className = 'db-result';
+    el.innerHTML =
+      '<b>CSV 导入结果：</b>共 ' + total + ' 条 → ' +
+      '<span class="cnt-add">新增 ' + added + '</span>' +
+      '<span class="cnt-upd">· 更新 ' + updated + '</span>' +
+      '<span class="cnt-del">· 删除 ' + deleted + '</span>' +
+      '<button class="close" title="关闭">✕</button>';
+    show(el);
+    el.querySelector('.close').addEventListener('click', function () { hide(el); });
+  }
+
+  /* CSV 覆盖后从主 db 全量重建内存 photos 与地图标记 */
+  function rebuildPhotosFromDb() {
+    if (thumbLayer) thumbLayer.clearLayers();
+    if (dotLayer) dotLayer.clearLayers();
+    photos.length = 0;
+    hashSet = Object.create(null);
+    dotsBuilt = false;
+    playerThumb = null;
+    if (!db) { updateStat(); return; }
+    var res = db.exec('SELECT hash,name,path,taken_at,taken_ts,lat,lng,alt,width,height,size,thumb,thumb_w,thumb_h FROM photos');
+    var rows = (res && res[0]) ? res[0].values : [];
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var p = {
+        hash: r[0], name: r[1], path: r[2], takenStr: r[3], takenTs: r[4],
+        lat: r[5], lng: r[6], alt: r[7], width: r[8], height: r[9], size: r[10],
+        thumb: r[11], tw: r[12] || THUMB_MAX, th: r[13] || THUMB_MAX,
+        file: null, fromDb: true
+      };
+      if (p.lat == null || p.lng == null) continue;
+      hashSet[p.hash] = true;
+      preparePhoto(p);
+      photos.push(p);
+    }
+    updateStat();
+    scheduleRender();
+  }
+
+  function saveDbEdits() {
+    if (!dbMgr.dirty) { toast('没有需要保存的修改'); return; }
+    var target = dbMgr.mode === 'memory' ? db : dbMgr.fileDb;
+    if (!target) { toast('数据库未初始化'); return; }
+    var cnt = 0;
+    try {
+      target.run('BEGIN');
+      for (var i = 0; i < dbMgr.rows.length; i++) {
+        var r = dbMgr.rows[i];
+        if (r._edit.name != null && r._edit.name !== r.name) {
+          target.run('UPDATE photos SET name=? WHERE hash=?', [r._edit.name, r.hash]);
+          r.name = r._edit.name; cnt++;
+        }
+        if (r._edit.path != null && r._edit.path !== r.path) {
+          target.run('UPDATE photos SET path=? WHERE hash=?', [r._edit.path, r.hash]);
+          r.path = r._edit.path; cnt++;
+        }
+        r._edit = {};
+      }
+      target.run('COMMIT');
+    } catch (e) {
+      try { target.run('ROLLBACK'); } catch (e2) {}
+      toast('保存失败：' + (e.message || e), 8000);
+      return;
+    }
+    dbMgr.dirty = false;
+    if (dbMgr.mode === 'memory') {
+      dbDirty = true;
+      var editMap = Object.create(null);
+      for (var m = 0; m < dbMgr.rows.length; m++) editMap[dbMgr.rows[m].hash] = dbMgr.rows[m];
+      for (var j = 0; j < photos.length; j++) {
+        var row = editMap[photos[j].hash];
+        if (row) { photos[j].name = row.name; photos[j].path = row.path; }
+      }
+      saveData();
+    } else {
+      persistFileDb();
+    }
+    applyFilter();
+    updateFilterInfo();
+    renderDbTable();
+    renderDbDetail();
+    toast('已保存 ' + cnt + ' 处修改');
+  }
+
+  function persistFileDb() {
+    if (!dbMgr.fileDb || !dbMgr.fileHandle) { toast('无文件句柄，无法保存'); return; }
+    var bytes = dbMgr.fileDb.export();
+    dbMgr.fileHandle.createWritable().then(function (w) {
+      return w.write(bytes).then(function () { return w.close(); });
+    }).then(function () {
+      toast('已写回 ' + dbMgr.fileName);
+    }).catch(function (e) {
+      toast('写回失败：' + (e.message || e), 8000);
+    });
+  }
+
+  function pickDbFileForManage() {
+    if (dbMgr.dirty && !window.confirm('当前有未保存的编辑，切换文件将丢失，是否继续？')) return;
+    if (!window.showOpenFilePicker) { toast('当前浏览器不支持文件选择，请用 Chrome / Edge'); return; }
+    ensureProjectDir().then(function () {
+      var opts = {
+        multiple: false,
+        types: [{ description: 'SQLite 数据库', accept: { 'application/octet-stream': ['.db', '.sqlite', '.sqlite3'] } }]
+      };
+      if (saveDirHandle) opts.startIn = saveDirHandle;
+      return window.showOpenFilePicker(opts);
+    }).then(function (handles) {
+      if (!handles || !handles[0]) return null;
+      var handle = handles[0];
+      dbMgr.fileHandle = handle;
+      dbMgr.fileName = handle.name;
+      return handle.getFile().then(function (file) { return file.arrayBuffer(); });
+    }).then(function (buf) {
+      if (!buf) return;
+      return loadSqlJs().then(function () {
+        if (dbMgr.fileDb) { try { dbMgr.fileDb.close(); } catch (e) {} }
+        dbMgr.fileDb = new SQL.Database(new Uint8Array(buf));
+        dbMgr.mode = 'file';
+        dbMgr.rows = queryDbRows(dbMgr.fileDb);
+        dbMgr.dirty = false;
+        dbMgr.selHash = null;
+        dbMgr.page = 0;
+        applyFilter();
+        updateFilterInfo();
+        $('dbManageSource').textContent = '数据来源：' + dbMgr.fileName + '（' + dbMgr.rows.length + ' 行，编辑保存后写回该文件）';
+        renderDbTable();
+        hide($('dbDetail'));
+      });
+    }).catch(function (e) {
+      if (e && e.name === 'AbortError') return;
+      toast('打开文件失败：' + (e.message || e), 8000);
+    });
+  }
+
+  function closeDbManage() {
+    if (dbMgr.dirty && !window.confirm('有未保存的编辑，关闭将丢失，是否继续？')) return;
+    hide($('dbManageModal'));
+    if (dbMgr.fileDb) { try { dbMgr.fileDb.close(); } catch (e) {} dbMgr.fileDb = null; }
+    dbMgr.fileHandle = null;
+    dbMgr.fileName = '';
+    dbMgr.mode = 'memory';
+    dbMgr.rows = [];
+    dbMgr.filtered = [];
+    dbMgr.dirty = false;
+    dbMgr.selHash = null;
+    dbMgr.page = 0;
+    dbMgr.filterFrom = null;
+    dbMgr.filterTo = null;
+    hide($('dbResult'));
+  }
+
+  /* ============================================================
+   * 九、手动补录（长按地图为无 GPS 照片补坐标）
+   * ============================================================ */
+  var manualMode = false;
+  var manualPending = null;   // {hash,thumb,tw,th,width,height,size,takenTs,takenStr,hasExifTime,name,path,file}
+  var manualLatLng = null;    // 长按位置（GCJ02 地图坐标）
+
+  /* GCJ02 → WGS84 逆转换（迭代逼近，海外天然恒等）*/
+  function gcj02ToWgs84(lng, lat) {
+    var wgsLng = lng, wgsLat = lat;
+    for (var i = 0; i < 5; i++) {
+      var g = ExifLite.wgs84ToGcj02(wgsLng, wgsLat);
+      wgsLng += lng - g[0];
+      wgsLat += lat - g[1];
+    }
+    return [wgsLng, wgsLat];
+  }
+
+  function toggleManualMode() {
+    if (!manualMode && !db) {
+      toast('请先加载数据库文件再补录（补录需写入数据库并按哈希判重）', 8000);
+      return;
+    }
+    manualMode = !manualMode;
+    $('btnManual').classList.toggle('on', manualMode);
+    document.body.classList.toggle('manual-mode', manualMode);
+    if (manualMode) {
+      map.on('contextmenu', onMapLongPress);
+      toast('已进入补录模式：长按地图位置选点（播放中需先暂停）', 8000);
+    } else {
+      map.off('contextmenu', onMapLongPress);
+      hide($('manualModal'));
+      toast('已退出补录模式');
+    }
+  }
+
+  function onMapLongPress(e) {
+    if (player.running && !player.paused) {
+      toast('播放中不能补录，请先暂停播放', 5000);
+      return;
+    }
+    manualLatLng = e.latlng;
+    openManualModal();
+  }
+
+  function openManualModal() {
+    var wgs = gcj02ToWgs84(manualLatLng.lng, manualLatLng.lat);
+    $('manualLat').value = Number(wgs[1]).toFixed(6);
+    $('manualLng').value = Number(wgs[0]).toFixed(6);
+    $('manualTime').value = toLocalInput(Date.now());
+    $('manualTime').disabled = false;
+    resetManualFile();
+    show($('manualModal'));
+  }
+
+  function resetManualFile() {
+    manualPending = null;
+    $('manualFileName').textContent = '点击选择照片';
+    $('manualFilePick').classList.remove('has');
+    $('manualTime').disabled = false;
+    $('manualHint').innerHTML = '提示：拍摄时间以照片 EXIF 为准（若存在），否则使用上方填写的时间。哈希重复的照片禁止保存。';
+  }
+
+  function onManualPhotoChange(file) {
+    if (!file) return;
+    resetManualFile();
+    $('manualFileName').textContent = file.name;
+    $('manualFilePick').classList.add('has');
+    progress('正在解析照片', 0, 1, file.name);
+    processFile(file).then(function (p) {
+      progressDone();
+      if (p.dup) {
+        toast('该照片已存在（哈希重复），无法补录', 8000);
+        $('manualFileName').textContent = '哈希重复，请更换照片';
+        $('manualFilePick').classList.remove('has');
+        manualPending = null;
+        return;
+      }
+      manualPending = {
+        hash: p.hash, thumb: p.thumb, tw: p.tw, th: p.th,
+        width: p.width, height: p.height, size: p.size,
+        takenTs: p.takenTs, takenStr: p.takenStr,
+        hasExifTime: !p.approxTime,
+        name: p.name, path: p.path, file: file
+      };
+      if (manualPending.hasExifTime) {
+        $('manualTime').value = toLocalInput(p.takenTs);
+        $('manualTime').disabled = true;
+        $('manualHint').innerHTML = '已检测到照片 EXIF 拍摄时间，<b>以照片时间为准</b>。';
+      } else {
+        $('manualHint').innerHTML = '照片无 EXIF 时间，请<b>手动填写拍摄时间</b>。';
+      }
+    }).catch(function (e) {
+      progressDone();
+      toast('解析照片失败：' + (e.message || e), 8000);
+      resetManualFile();
+    });
+  }
+
+  function saveManualPhoto() {
+    if (!manualPending) { toast('请先选择照片'); return; }
+    if (hashSet[manualPending.hash]) { toast('该照片哈希已存在，禁止保存', 8000); return; }
+    var lat = parseFloat($('manualLat').value);
+    var lng = parseFloat($('manualLng').value);
+    if (!(lat >= -90 && lat <= 90) || !(lng >= -180 && lng <= 180)) { toast('经纬度无效'); return; }
+    var takenTs, approxTime, takenStr;
+    if (manualPending.hasExifTime) {
+      takenTs = manualPending.takenTs;
+      approxTime = false;
+      takenStr = manualPending.takenStr;
+    } else {
+      var t = $('manualTime').value;
+      if (!t) { toast('请填写拍摄时间'); return; }
+      takenTs = new Date(t).getTime();
+      approxTime = true;
+      takenStr = fmtTime(takenTs);
+    }
+    var p = {
+      hash: manualPending.hash,
+      name: manualPending.name,
+      path: manualPending.path,
+      takenTs: takenTs,
+      takenStr: takenStr,
+      approxTime: approxTime,
+      lat: lat, lng: lng, alt: null,
+      width: manualPending.width, height: manualPending.height,
+      size: manualPending.size,
+      thumb: manualPending.thumb, tw: manualPending.tw, th: manualPending.th,
+      file: manualPending.file, fromDb: false
+    };
+    ensureDb().then(function () {
+      insertPhoto(p);
+      hashSet[p.hash] = true;
+      preparePhoto(p);
+      photos.push(p);
+      updateStat();
+      scheduleRender();
+      return saveData();
+    }).then(function () {
+      toast('已补录点位：' + p.name, 5000);
+      hide($('manualModal'));
+      resetManualFile();
+    }).catch(function (e) {
+      toast('保存失败：' + (e.message || e), 8000);
+    });
+  }
+
+  /* ============================================================
+   * 十、事件绑定
    * ============================================================ */
   function bindUI() {
     var menu = $('importMenu');
@@ -1364,6 +2209,61 @@
     }
 
     $('btnSave').addEventListener('click', function () { saveData(); });
+
+    // 数据库直接管理
+    $('btnDbManage').addEventListener('click', function (e) {
+      e.stopPropagation();
+      openDbManage();
+    });
+    $('dbManageClose').addEventListener('click', closeDbManage);
+    $('dbManageModal').addEventListener('click', function (e) {
+      if (e.target === this) closeDbManage();
+    });
+    $('dbPickFile').addEventListener('click', pickDbFileForManage);
+    $('dbExportCsv').addEventListener('click', exportDbCsv);
+    $('dbImportCsv').addEventListener('click', function () { $('csvInput').click(); });
+    $('csvInput').addEventListener('change', function () {
+      var f = this.files && this.files[0];
+      this.value = '';
+      if (f) importDbCsv(f);
+    });
+    $('dbSaveEdit').addEventListener('click', saveDbEdits);
+
+    // 筛选与分页
+    function onFilterChange() {
+      var fromVal = $('dbFilterFrom').value;
+      var toVal = $('dbFilterTo').value;
+      dbMgr.filterFrom = fromVal ? new Date(fromVal + 'T00:00:00').getTime() : null;
+      dbMgr.filterTo = toVal ? new Date(toVal + 'T23:59:59.999').getTime() : null;
+      dbMgr.page = 0;
+      applyFilter();
+      updateFilterInfo();
+      renderDbTable();
+    }
+    $('dbFilterFrom').addEventListener('change', onFilterChange);
+    $('dbFilterTo').addEventListener('change', onFilterChange);
+    $('dbFilterReset').addEventListener('click', function () {
+      $('dbFilterFrom').value = '';
+      $('dbFilterTo').value = '';
+      onFilterChange();
+    });
+
+    // 手动补录
+    $('btnManual').addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleManualMode();
+    });
+    $('manualCancel').addEventListener('click', function () { hide($('manualModal')); resetManualFile(); });
+    $('manualModal').addEventListener('click', function (e) {
+      if (e.target === this) { hide($('manualModal')); resetManualFile(); }
+    });
+    $('manualSave').addEventListener('click', saveManualPhoto);
+    $('manualFilePick').addEventListener('click', function () { $('manualPhotoInput').click(); });
+    $('manualPhotoInput').addEventListener('change', function () {
+      var f = this.files && this.files[0];
+      this.value = '';
+      if (f) onManualPhotoChange(f);
+    });
 
     $('btnPlay').addEventListener('click', openPlayModal);
     $('playCancel').addEventListener('click', function () { hide($('playModal')); });
