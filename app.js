@@ -205,6 +205,7 @@
     map.on('zoomend', updateScale);
     map.on('moveend', updateScale);
     updateScale();
+    initSearchBox();
   }
 
   /* 右下角比例尺：按中心纬度 + 缩放级别计算地面尺度（Web Mercator），
@@ -237,6 +238,191 @@
     }
     if (m >= 1) return m + ' m';
     return (Math.round(m * 100) / 100) + ' m';
+  }
+
+  /* 左上角地点搜索：本地数据集（省市区+5A景区，GCJ-02）优先 + OSM/镜像地球远程补充 */
+  function initSearchBox() {
+    var input = $('searchInput');
+    var results = $('searchResults');
+    var spin = $('searchSpin');
+    if (!input || !map) return;
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+    function showLoading(on) { spin.classList.toggle('on', !!on); }
+    function closeResults() { results.classList.add('hidden'); }
+
+    var debounce = null;
+    var reqSeq = 0;
+    var items = [];
+
+    /* 本地数据集：省市区三级 + 5A景区（均为 GCJ-02 坐标，无需纠偏）
+       若数据文件未加载（file:// 缺失等），localData 为空，仅走远程搜索 */
+    var localData = [];
+    if (window.CHINA_PLACES) {
+      window.CHINA_PLACES.forEach(function (p) {
+        localData.push({ src: 'local', type: 'area', name: p.n, path: p.p, lng: p.lng, lat: p.lat, deep: p.d });
+      });
+    }
+    if (window.SCENIC_5A) {
+      window.SCENIC_5A.forEach(function (s) {
+        localData.push({ src: 'local', type: 'scenic', name: s.n, path: s.p, lng: s.lng, lat: s.lat });
+      });
+    }
+
+    function localSearch(q) {
+      var ql = q.toLowerCase();
+      var matched = [];
+      for (var i = 0; i < localData.length; i++) {
+        var d = localData[i];
+        if (d.name.toLowerCase().indexOf(ql) >= 0 || d.path.toLowerCase().indexOf(ql) >= 0) {
+          matched.push(d);
+          if (matched.length >= 8) break;
+        }
+      }
+      return matched;
+    }
+
+    // 远程地理编码：OSM 官方优先，镜像地球（国内可直连）作为降级
+    var OSM_SEARCH = 'https://nominatim.openstreetmap.org/search';
+    var MIRROR_SEARCH = 'https://api.mirror-earth.com/nominatim/search';
+    var OSM_TIMEOUT = 5000;
+    var osmSuspect = false;
+    var osmRetryAt = 0;
+
+    function renderEmpty(msg) {
+      items = [];
+      results.innerHTML = '<div class="search-empty">' + escapeHtml(msg) + '</div>';
+      results.classList.remove('hidden');
+    }
+
+    /* 渲染合并结果：本地在前，远程在后 */
+    function renderMerged(local, remote) {
+      items = [];
+      var html = '';
+      if (local.length) {
+        local.forEach(function (r) {
+          var icon = r.type === 'scenic' ? '\uD83C\uDFDB' : '\uD83D\uDCCD';
+          var typeLabel = r.type === 'scenic' ? '5A景区' : (r.deep === 0 ? '省份' : r.deep === 1 ? '城市' : '区县');
+          var coord = r.lat.toFixed(5) + ', ' + r.lng.toFixed(5);
+          html += '<div class="search-item" data-i="' + items.length + '">' +
+            '<div class="search-title">' + icon + ' ' + escapeHtml(r.name) + '</div>' +
+            '<div class="search-sub">' + escapeHtml(r.path) + ' \u00B7 ' + typeLabel + '</div>' +
+            '<div class="search-coord">' + coord + '</div></div>';
+          items.push(r);
+        });
+      }
+      if (remote && remote.length) {
+        if (local.length) {
+          html += '<div class="search-empty" style="padding:5px 10px;font-size:11px;color:#9aa3b1">\u2014 \u5728\u7EBF\u641C\u7D22 \u2014</div>';
+        }
+        remote.forEach(function (r) {
+          var a = r.address || {};
+          var title = (r.display_name ? String(r.display_name).split(',')[0].trim() : '') || r.name || '未知地点';
+          var main = a.city || a.town || a.county || a.state || '';
+          var region = [a.state, a.country].filter(function (x) { return x && x !== main; }).join(' \u00B7 ');
+          var coord = parseFloat(r.lat).toFixed(5) + ', ' + parseFloat(r.lon).toFixed(5);
+          html += '<div class="search-item" data-i="' + items.length + '">' +
+            '<div class="search-title">\uD83C\uDF10 ' + escapeHtml(title) + '</div>' +
+            (region ? '<div class="search-sub">' + escapeHtml(region) + '</div>' : '') +
+            '<div class="search-coord">' + coord + '</div></div>';
+          items.push({ src: 'remote', lat: r.lat, lng: r.lon, name: title });
+        });
+      }
+      showLoading(false);
+      if (!items.length) { renderEmpty('无结果'); return; }
+      results.innerHTML = html;
+      results.classList.remove('hidden');
+    }
+
+    function doSearch(q) {
+      var local = localSearch(q);
+      if (local.length) renderMerged(local, null);   // 本地结果即时显示
+      var useMirror = osmSuspect && Date.now() < osmRetryAt;
+      searchProvider(q, useMirror, local);
+    }
+
+    function searchProvider(q, useMirror, local) {
+      var id = ++reqSeq;
+      if (!local.length) showLoading(true);
+      var base = useMirror ? MIRROR_SEARCH : OSM_SEARCH;
+      var url = base + '?format=jsonv2&q=' + encodeURIComponent(q) +
+        '&limit=6&accept-language=zh-CN&addressdetails=1';
+      var controller = ('AbortController' in window) ? new AbortController() : null;
+      var timer = setTimeout(function () { if (controller) controller.abort(); }, useMirror ? 8000 : OSM_TIMEOUT);
+
+      function finish() { clearTimeout(timer); }
+      function failOnce(reason) {
+        if (useMirror) {
+          if (!local.length) {
+            showLoading(false);
+            renderEmpty(reason === 'rate' ? '搜索过于频繁，稍候再试' : '无结果 / 请求失败');
+          }
+          return;
+        }
+        osmSuspect = true; osmRetryAt = Date.now() + 60000;
+        searchProvider(q, true, local);
+      }
+
+      var req = controller ? fetch(url, { signal: controller.signal }) : fetch(url);
+      req.then(function (res) {
+        if (id !== reqSeq) return;
+        finish();
+        if (res.status === 429) { failOnce('rate'); return; }
+        if (!res.ok) { failOnce('fail'); return; }
+        return res.json();
+      }).then(function (data) {
+        if (id !== reqSeq) return;
+        if (data && data.length) {
+          if (useMirror) { osmSuspect = true; osmRetryAt = Date.now() + 60000; }
+          else { osmSuspect = false; }
+          renderMerged(local, data);
+        } else if (!useMirror) {
+          searchProvider(q, true, local);
+        } else {
+          if (!local.length) { showLoading(false); renderEmpty('无结果 / 请求失败'); }
+        }
+      }).catch(function () {
+        if (id !== reqSeq) return;
+        finish();
+        failOnce('fail');
+      });
+    }
+
+    input.addEventListener('input', function () {
+      var q = input.value.trim();
+      if (debounce) { clearTimeout(debounce); debounce = null; }
+      if (q.length < 2) { closeResults(); showLoading(false); return; }
+      debounce = setTimeout(function () { doSearch(q); }, 350);
+    });
+
+    results.addEventListener('click', function (e) {
+      var el = e.target.closest ? e.target.closest('.search-item') : null;
+      if (!el) return;
+      var r = items[+el.getAttribute('data-i')];
+      if (!r) return;
+      var lat, lng, zoom;
+      if (r.src === 'local') {
+        lat = r.lat; lng = r.lng;   // GCJ-02，直接使用
+        zoom = r.type === 'scenic' ? 13 : (r.deep === 0 ? 8 : r.deep === 1 ? 11 : 12);
+      } else {
+        lat = parseFloat(r.lat); lng = parseFloat(r.lng);
+        if (inChina(lat, lng)) { var g = ExifLite.wgs84ToGcj02(lng, lat); lng = g[0]; lat = g[1]; }
+        zoom = 14;
+      }
+      showLoading(false);
+      map.setView([lat, lng], zoom);
+      input.value = r.name || '';
+      closeResults();
+    });
+
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { input.value = ''; closeResults(); }
+    });
+    input.addEventListener('blur', function () { setTimeout(closeResults, 150); });
   }
 
   /* 国内判定边界与 exif.js 的 outOfChina 一致：境外 GCJ02 转换为恒等，

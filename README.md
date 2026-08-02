@@ -8,6 +8,7 @@
 - 高德公开瓦片（标准 / 卫星两种模式切换），免注册免 Key
 - **国内 / 海外底图自动切换**：以地图中心点判定 —— 国内用高德（GCJ02），海外用 OSM 标准图 / Esri 卫星影像 + 地名边界层（WGS84），跨区平移无感切换并轻提示
 - 照片点位 WGS84 → GCJ02 自动纠偏，国内精准落图；海外点位不偏移，与 WGS84 瓦片天然对齐
+- 左上角**地点搜索框**：输入即搜，本地省市区 + 5A 景区数据集优先命中（免 Key、可离线），无结果时自动联机 OSM / 镜像地球地理编码补全；选中即飞到该地点，国内结果自动纠偏
 - 点位缩略图随地图缩放按比例变化
 - 鼠标悬停（PC）/ 点按缩略图居中弹出大图，不遮挡背景地图；点击空白处或 Esc 关闭
 - 大图卡片右上角支持**编辑**（仅文件名 / 路径）与**删除**（二次确认，立即从数据库删除不可恢复）
@@ -101,6 +102,13 @@
 | ▦    | 数据库直接管理 | 预览 / 行内编辑 / 筛选 / 分页 / 导出 CSV / 导入 CSV 覆盖                              |
 | ⊕    | 手动补录       | 长按地图选点，为无 GPS 照片补坐标；播放中禁用                                         |
 
+### 左上角搜索框
+
+- 输入 ≥2 个字符即开始搜索（防抖 350ms），本地省市区与 5A 景区按名称 / 路径匹配优先返回，命中即时展示、无需联网
+- 本地无匹配或想搜更全时，自动联机 OSM Nominatim / 镜像地球地理编码补全（覆盖全球地名）；主服务不可达时自动降级，网络受限时仍保留本地结果
+- 选中结果地图直接飞到该地点并按类型缩放到合适级别；国内在线结果自动做 WGS84→GCJ02 纠偏
+- 数据来自 `vendor/china-places.js`（省市区三级）与 `vendor/scenic-5a.js`（5A 景区），均为 GCJ-02 坐标；file:// 下若数据文件缺失则仅走在线搜索
+
 ### 右下角控件
 
 - **+ / −**：地图缩放
@@ -134,7 +142,9 @@ LocalPhotoWall/
 │   ├── leaflet.js
 │   ├── sql-asm.js          # asm.js 构建（file:// 降级用）
 │   ├── sql-wasm.js         # WASM 加载器
-│   └── sql-wasm.wasm       # WASM 二进制
+│   ├── sql-wasm.wasm       # WASM 二进制
+│   ├── china-places.js      # 中国省市区三级行政区划数据集（GCJ-02，本地搜索用）
+│   └── scenic-5a.js         # 中国 5A 景区数据集（GCJ-02，本地搜索用）
 ├── bak/                    # 手动归档的历史数据库（已 gitignore）
 └── photos.db               # 主数据库（运行时生成，已 gitignore）
 ```
@@ -208,3 +218,7 @@ MIT License
 - [Leaflet](https://leafletjs.com/) — 开源地图库
 - [sql.js](https://sql.js.org/) — SQLite 编译到 WebAssembly
 - 高德地图 / [OpenStreetMap](https://www.openstreetmap.org/) / [Esri](https://www.arcgis.com/) — 公开瓦片服务
+- [AreaCity-JsSpider-StatsGov](https://github.com/modood/Administrative-divisions-of-China) — 中国省市区行政区划数据（MIT）
+- 中华人民共和国文化和旅游部 — 5A 级旅游景区官方名录
+- [apihz.cn](https://www.apihz.cn/) — 公开 5A 景区坐标记录
+- [镜像地球 api.mirror-earth.com](https://api.mirror-earth.com/) — 国内可直连的 Nominatim 镜像（地理编码降级用）
