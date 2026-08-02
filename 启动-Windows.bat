@@ -20,5 +20,12 @@ echo  关闭此窗口即停止服务
 echo ───────────────────────────────────────
 
 start "" "http://localhost:%PORT%/%PAGE%"
-python -m http.server %PORT% 2>nul || py -m http.server %PORT%
+
+rem 先探测 python 是否可用，避免 Ctrl+C 停止服务后被 || 误判为失败又用 py 重启
+where python >nul 2>nul
+if %errorlevel%==0 (
+  python -m http.server %PORT%
+) else (
+  py -m http.server %PORT%
+)
 pause

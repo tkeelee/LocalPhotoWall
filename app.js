@@ -39,7 +39,6 @@
   /* 渲染层：高缩放用 thumbLayer(divIcon 缩略图 + 视口裁剪)，低缩放用 dotLayer(Canvas 圆点) */
   var thumbLayer = null, dotLayer = null, dotRenderer = null;
   var renderRaf = 0, scaleRaf = 0;
-  var dotsBuilt = false;            // dotLayer 是否已填充
   var playerThumb = null;           // 播放时低缩放下当前照片的临时缩略图 marker
 
   /* ---------------- 短工具 ---------------- */
@@ -201,6 +200,43 @@
     $('btnZoomOut').addEventListener('click', function () { map.zoomOut(); });
     $('btnLayer').addEventListener('click', toggleLayer);
     $('btnDevice').addEventListener('click', function () { setDevice(!isMobile, true); });
+
+    // 右下角比例尺：随缩放/平移实时更新
+    map.on('zoomend', updateScale);
+    map.on('moveend', updateScale);
+    updateScale();
+  }
+
+  /* 右下角比例尺：按中心纬度 + 缩放级别计算地面尺度（Web Mercator），
+     跟踪地图软件样式——标尺规整为 1/2/5×10ⁿ，下方标注实际距离。 */
+  function updateScale() {
+    var bar = $('scaleBar');
+    if (!bar || !map) return;
+    var lat = map.getCenter().lat;
+    var zoom = map.getZoom();
+    // 赤道分辨率（米/像素，zoom0）乘 cos(纬度) 得当前纬度每像素地面距离
+    var mpp = 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom);
+    var targetPx = 80;                          // 标尺目标像素宽度
+    var dist = niceScaleNumber(mpp * targetPx); // 规整为 1/2/5×10ⁿ
+    var px = dist / mpp;
+    bar.querySelector('.scale-line').style.width = Math.round(px) + 'px';
+    bar.querySelector('.scale-label').textContent = formatScaleDist(dist);
+  }
+  function niceScaleNumber(v) {
+    if (!(v > 0)) return 1;
+    var exp = Math.floor(Math.log10(v));
+    var base = Math.pow(10, exp);
+    var f = v / base;
+    var nf = f >= 5 ? 5 : (f >= 2 ? 2 : 1);
+    return nf * base;
+  }
+  function formatScaleDist(m) {
+    if (m >= 1000) {
+      var km = m / 1000;
+      return (km % 1 === 0 ? km : (Math.round(km * 10) / 10)) + ' km';
+    }
+    if (m >= 1) return m + ' m';
+    return (Math.round(m * 100) / 100) + ' m';
   }
 
   /* 国内判定边界与 exif.js 的 outOfChina 一致：境外 GCJ02 转换为恒等，
@@ -1061,6 +1097,15 @@
       '</div>' +
       '<div id="viewerMeta"></div>';
     document.body.appendChild(box);
+    // 删除/编辑按钮只在此处绑定一次（openViewer 不再重复绑定，避免监听器累积）
+    box.querySelector('#viewerDelBtn').addEventListener('click', function (ev) {
+      ev.stopPropagation();   // 阻止冒泡，避免触发 dismissHandler
+      openDelModal();
+    });
+    box.querySelector('#viewerEditBtn').addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      openViewerEditor();
+    });
     // 鼠标进入预览框/元信息区：取消延迟关闭，允许操作按钮与选中文字
     // 鼠标离开：启动延迟关闭（220ms 后关闭，留出从缩略图移向大图的时间）
     function bindHover(el) {
@@ -1072,11 +1117,21 @@
     return { box: box };
   }
 
+  // 删除确认弹窗 / 查看器内编辑表单等「带选择」弹窗打开时，查看器不应自动关闭
+  function viewerModalOpen() {
+    var d = $('delModal');
+    if (d && !d.classList.contains('hidden')) return true;
+    var meta = $('viewerMeta');
+    if (meta && meta.querySelector('.ve-form')) return true;
+    return false;
+  }
+
   function scheduleViewerClose() {
+    if (viewerModalOpen()) return;   // 弹窗打开时不排程自动关闭
     cancelViewerClose();
     viewerCloseTimer = setTimeout(function () {
       viewerCloseTimer = null;
-      if (viewerOpen) closeViewer();
+      if (viewerOpen && !viewerModalOpen()) closeViewer();
     }, VIEWER_HOVER_DELAY);
   }
   function cancelViewerClose() {
@@ -1084,6 +1139,8 @@
   }
 
   function dismissHandler(e) {
+    // 删除确认 / 编辑表单等弹窗打开时，点击不应关闭查看器（否则弹窗被连带关闭）
+    if (viewerModalOpen()) return;
     // 点击编辑/删除按钮不关闭
     if (e.target && e.target.closest && e.target.closest('#viewerDelBtn,#viewerEditBtn')) return;
     // 点击照片标记本身不关闭
@@ -1115,18 +1172,6 @@
     viewerOwnerEl = ownerEl || null;
     viewerPhoto = p;   // 保存引用用于删除
     bindDismiss();
-
-    // 绑定删除按钮（每次打开绑定，防止闭包残留）
-    $('viewerDelBtn').addEventListener('click', function (ev) {
-      ev.stopPropagation();   // 阻止冒泡，避免触发 dismissHandler
-      openDelModal();
-    });
-
-    // 绑定编辑按钮
-    $('viewerEditBtn').addEventListener('click', function (ev) {
-      ev.stopPropagation();
-      openViewerEditor();
-    });
 
     var img = $('viewerImg');
     var meta = $('viewerMeta');
@@ -1168,6 +1213,7 @@
 
   /* 删除确认框与逻辑 */
   function openDelModal() {
+    cancelViewerClose();   // 取消可能已排程的悬停关闭，防止本弹窗被查看器连带关闭
     show($('delModal'));
   }
   function hideDelModal() {
@@ -1178,6 +1224,7 @@
   function openViewerEditor() {
     var p = viewerPhoto;
     if (!p) return;
+    cancelViewerClose();   // 同删除弹窗：编辑期间查看器不得被悬停关闭
     var meta = $('viewerMeta');
     meta.innerHTML =
       '<div class="ve-form">' +
@@ -1237,11 +1284,7 @@
   /* 用照片数据重新渲染 viewerMeta（取消编辑或保存后恢复显示）*/
   function renderViewerMeta(p) {
     var meta = $('viewerMeta');
-    var warn = (!p.file && p.fromDb) ? '<div class="warn">原图不在本机 · 缩略图已放大 ' + FALLBACK_UPSCALE + ' 倍显示</div>' : '';
-    // 判断当前是否为缩略图放大模式
-    var img = $('viewerImg');
-    if (!p.file) warn = '<div class="warn">原图不在本机 · 缩略图已放大 ' + FALLBACK_UPSCALE + ' 倍显示</div>';
-    else warn = '';
+    var warn = p.file ? '' : '<div class="warn">原图不在本机 · 缩略图已放大 ' + FALLBACK_UPSCALE + ' 倍显示</div>';
     meta.innerHTML =
       '<div class="n">' + escapeHtml(p.name) + '</div>' +
       '<div class="s">' + (p.approxTime ? '≈ ' : '') + fmtTime(p.takenTs) +
@@ -1325,9 +1368,12 @@
   function openPlayModal() {
     var tr = photoTimeRange();
     if (!tr.list.length) { toast('还没有可播放的照片，请先导入或加载数据'); return; }
-    // 优先使用上次缓存的播放区间，无缓存则用全范围
-    var cachedS = localStorage.getItem('pw_playStart');
-    var cachedE = localStorage.getItem('pw_playEnd');
+    // 优先使用上次缓存的播放区间，无缓存则用全范围（隐私模式 localStorage 可能抛异常，静默降级）
+    var cachedS = null, cachedE = null;
+    try {
+      cachedS = localStorage.getItem('pw_playStart');
+      cachedE = localStorage.getItem('pw_playEnd');
+    } catch (err) { /* 忽略 */ }
     if (cachedS) $('playStart').value = cachedS;
     else $('playStart').value = toLocalInput(tr.min);
     if (cachedE) $('playEnd').value = cachedE;
@@ -1511,13 +1557,10 @@
     dbMgr.dirty = false;
     dbMgr.page = 0;
     dbMgr.pageSize = window.innerWidth <= 760 ? 5 : 10;
-    dbMgr.filterFrom = null;
-    dbMgr.filterTo = null;
     hide($('dbResult'));
-    $('dbFilterFrom').value = '';
-    $('dbFilterTo').value = '';
     ensureDb().then(function () {
       dbMgr.rows = queryDbRows(db);
+      initDbFilterRange();   // 默认筛选范围 = 所选库拍摄时间的最小/最大
       applyFilter();
       updateFilterInfo();
       $('dbManageSource').textContent = '数据来源：当前内存数据库（只读预览，' + dbMgr.rows.length + ' 行，如需编辑请选择其他 db 文件）';
@@ -1576,6 +1619,30 @@
     return rows;
   }
 
+  /* 将日期筛选默认值设为当前库数据的拍摄时间最小/最大（对应所选择库的范围）*/
+  function initDbFilterRange() {
+    var min = null, max = null;
+    for (var i = 0; i < dbMgr.rows.length; i++) {
+      var t = dbMgr.rows[i].taken_ts;
+      if (t == null) continue;
+      if (min == null || t < min) min = t;
+      if (max == null || t > max) max = t;
+    }
+    if (min != null) {
+      var md = new Date(min); md.setHours(0, 0, 0, 0);          // 当天 0 点
+      var xd = new Date(max); xd.setHours(23, 59, 59, 999);      // 当天 23:59:59.999
+      dbMgr.filterFrom = md.getTime();
+      dbMgr.filterTo = xd.getTime();
+      $('dbFilterFrom').value = fmtDate(min);
+      $('dbFilterTo').value = fmtDate(max);
+    } else {
+      dbMgr.filterFrom = null;
+      dbMgr.filterTo = null;
+      $('dbFilterFrom').value = '';
+      $('dbFilterTo').value = '';
+    }
+  }
+
   function applyFilter() {
     var rows = dbMgr.rows;
     if (dbMgr.filterFrom != null || dbMgr.filterTo != null) {
@@ -1605,10 +1672,8 @@
 
   function fmtDate(ts) {
     var d = new Date(ts);
-    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   }
-
-  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 
   function renderDbTable() {
     var scroll = $('dbScroll');
@@ -1909,6 +1974,7 @@
     dbMgr.rows = queryDbRows(target);
     dbMgr.dirty = false;
     dbMgr.selHash = null;
+    initDbFilterRange();   // 导入后按新数据集重置默认筛选范围
     if (dbMgr.mode === 'file') {
       $('dbManageSource').textContent = '数据来源：' + dbMgr.fileName + '（' + dbMgr.rows.length + ' 行，编辑保存后写回该文件）';
     } else {
@@ -1940,7 +2006,6 @@
     if (dotLayer) dotLayer.clearLayers();
     photos.length = 0;
     hashSet = Object.create(null);
-    dotsBuilt = false;
     playerThumb = null;
     if (!db) { updateStat(); return; }
     var res = db.exec('SELECT hash,name,path,taken_at,taken_ts,lat,lng,alt,width,height,size,thumb,thumb_w,thumb_h FROM photos');
@@ -2052,6 +2117,7 @@
           dbMgr.dirty = false;
           dbMgr.selHash = null;
           dbMgr.page = 0;
+          initDbFilterRange();   // 切换库后默认筛选范围 = 新库拍摄时间的最小/最大
           applyFilter();
           updateFilterInfo();
           if (isCurrent) {
@@ -2411,9 +2477,6 @@
       openDbManage();
     });
     $('dbManageClose').addEventListener('click', closeDbManage);
-    $('dbManageModal').addEventListener('click', function (e) {
-      if (e.target === this) closeDbManage();
-    });
     $('dbPickFile').addEventListener('click', pickDbFileForManage);
     $('dbExportCsv').addEventListener('click', exportDbCsv);
     $('dbImportCsv').addEventListener('click', function () { $('csvInput').click(); });
@@ -2438,9 +2501,11 @@
     $('dbFilterFrom').addEventListener('change', onFilterChange);
     $('dbFilterTo').addEventListener('change', onFilterChange);
     $('dbFilterReset').addEventListener('click', function () {
-      $('dbFilterFrom').value = '';
-      $('dbFilterTo').value = '';
-      onFilterChange();
+      dbMgr.page = 0;
+      initDbFilterRange();   // 重置为所选库拍摄时间的最小/最大（即全部数据范围）
+      applyFilter();
+      updateFilterInfo();
+      renderDbTable();
     });
 
     // 手动补录
@@ -2545,8 +2610,16 @@
     // $('progCancel').addEventListener('click', function () { tileCancel = true; });
 
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') { closeViewer(); hide($('playModal')); if (player.running) stopPlay(false); }
-      if (e.key === ' ' && player.running) { e.preventDefault(); pausePlay(); }
+      if (e.key === 'Escape') {
+        // 数据库直接管理弹窗刻意不响应 ESC（防误关丢失编辑），仅关闭查看器/播放弹窗
+        closeViewer(); hide($('playModal')); if (player.running) stopPlay(false);
+      }
+      // 空格暂停：输入控件内打字时不劫持
+      if (e.key === ' ' && player.running) {
+        var t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+        e.preventDefault(); pausePlay();
+      }
     });
 
     window.addEventListener('beforeunload', function (e) {
@@ -2706,7 +2779,7 @@
   */
 
   /* ============================================================
-   * 九、启动
+   * 十一、启动
    * ============================================================ */
   function detectMobile() {
     return /Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(navigator.userAgent) ||

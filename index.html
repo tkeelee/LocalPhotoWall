@@ -69,6 +69,30 @@
     line-height:1;color:currentColor;opacity:.85;
   }
 
+  /* ---------- 比例尺（缩放控件之下）---------- */
+  .scale-bar{
+    display:flex;flex-direction:column;align-items:center;gap:3px;
+    padding:5px 8px 4px;color:#20293a;user-select:none;pointer-events:none;
+    font:600 11px/1.1 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:rgba(255,255,255,.05);     /* 接近透明（95% 透明度），覆盖 .glass 毛玻璃背景 */
+    backdrop-filter:none;-webkit-backdrop-filter:none;
+    box-shadow:none;border:none;
+  }
+  .scale-bar .scale-line{
+    width:80px;height:0;border:0;border-bottom:2px solid currentColor;position:relative;
+  }
+  .scale-bar .scale-line::before,
+  .scale-bar .scale-line::after{
+    content:"";position:absolute;bottom:0;width:2px;height:6px;background:currentColor;
+  }
+  .scale-bar .scale-line::before{left:0}
+  .scale-bar .scale-line::after{right:0}
+  .scale-bar .scale-label{
+    order:-1;                            /* 文字放在标尺线之上 */
+    letter-spacing:.3px;
+    text-shadow:0 0 2px rgba(255,255,255,.75);  /* 透明底上提升可读性 */
+  }
+
   /* ---------- 左下功能区 ---------- */
   #panelLeft{
     position:absolute;z-index:600;
@@ -451,6 +475,10 @@
     <button class="ctrl-btn" id="btnZoomOut" title="缩小">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
     </button>
+  </div>
+  <div id="scaleBar" class="glass scale-bar" aria-hidden="true">
+    <div class="scale-line"></div>
+    <span class="scale-label"></span>
   </div>
 </div>
 
