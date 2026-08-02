@@ -21,6 +21,27 @@
     --safe-b:env(safe-area-inset-bottom,0px);
     --safe-r:env(safe-area-inset-right,0px);
     --safe-l:env(safe-area-inset-left,0px);
+
+    /* 浮层前景/背板主题（标准底图：浅色玻璃 + 近黑前景） */
+    --ink:#141a22;                           /* 浮层前景：dock 图标 / 播放条 / 比例尺 / 刻度线 */
+    --ink-soft:rgba(20,26,34,.62);           /* 浮层弱化前景：副标题/次要文字 */
+    --hud-bg:rgba(255,255,255,.2);            /* 玻璃背板：dock / 播放条 / 刻度条 / statBar */
+    --btn-bg:#f1f3f7;                        /* 播放按钮底 */
+    --btn-bg-hover:#e5e9f0;
+    --pbar-bg:#e6eaf1;                       /* 进度条底 */
+    --scale-bg:rgba(255,255,255,.05);         /* 比例尺底（近全透明） */
+  }
+
+  /* 卫星底图：深色玻璃 + 近白前景，避免与卫星影像背景混淆 */
+  body.satellite{
+    --ink:#f3f6fc;
+    --ink-soft:rgba(243,246,252,.72);
+    --hud-bg:rgba(20,26,34,.34);
+    --btn-bg:rgba(255,255,255,.12);
+    --btn-bg-hover:rgba(255,255,255,.20);
+    --pbar-bg:rgba(255,255,255,.18);
+    --scale-bg:rgba(20,26,34,.30);
+    --line:rgba(243,246,252,.14);     /* 浅色 hairline，匹配卫星暗玻璃 */
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{height:100%;margin:0;padding:0;overflow:hidden;background:var(--bg)}
@@ -44,6 +65,16 @@
     box-shadow:var(--shadow);
     border:1px solid rgba(255,255,255,.6);
   }
+
+  /* 主要 UI 面板统一为 80% 透明（覆盖 .glass 的 92% 不透明，保留模糊+阴影+边框）
+     卫星底图下通过 body.satellite --hud-bg 翻转为深色玻璃 */
+  #searchBox .search-input-wrap,
+  #searchResults,
+  #statBar,
+  #panelLeft .dock,
+  #ctrlRight .ctrl-group{
+    background:var(--hud-bg);
+  }
   .hidden{display:none !important}
 
   /* ---------- 右下控件栈 ---------- */
@@ -56,7 +87,7 @@
   .ctrl-group{display:flex;flex-direction:column;border-radius:var(--r);overflow:hidden}
   .ctrl-btn{
     width:44px;height:44px;display:flex;align-items:center;justify-content:center;
-    color:#20293a;transition:background .15s ease,color .15s ease;position:relative;
+    color:var(--ink);transition:background .15s ease,color .15s ease;position:relative;
   }
   .ctrl-btn:hover{background:rgba(43,108,255,.10);color:var(--brand)}
   .ctrl-btn:active{background:rgba(43,108,255,.18)}
@@ -72,9 +103,9 @@
   /* ---------- 比例尺（缩放控件之下）---------- */
   .scale-bar{
     display:flex;flex-direction:column;align-items:center;gap:3px;
-    padding:5px 8px 4px;color:#20293a;user-select:none;pointer-events:none;
+    padding:5px 8px 4px;color:var(--ink);user-select:none;pointer-events:none;
     font:600 11px/1.1 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
-    background:rgba(255,255,255,.05);     /* 接近透明（95% 透明度），覆盖 .glass 毛玻璃背景 */
+    background:var(--scale-bg);           /* 标准浅色玻璃 / 卫星深色玻璃（翻转跟随底图） */
     backdrop-filter:none;-webkit-backdrop-filter:none;
     box-shadow:none;border:none;
   }
@@ -103,15 +134,15 @@
   #searchBox .search-input-wrap{
     display:flex;align-items:center;gap:8px;padding:0 12px;border-radius:var(--r);overflow:hidden;
   }
-  #searchBox .search-ico{flex:none;opacity:.7}
+  #searchBox .search-ico{flex:none;opacity:.7;color:var(--ink)}
   #searchInput{
     flex:1;min-width:0;border:0;outline:0;background:transparent;
-    padding:11px 0;font-size:14px;color:var(--text);
+    padding:11px 0;font-size:14px;color:var(--ink);
   }
-  #searchInput::placeholder{color:#9aa3b1}
+  #searchInput::placeholder{color:var(--ink-soft)}
   #searchSpin{
     width:15px;height:15px;flex:none;border-radius:50%;display:none;
-    border:2px solid rgba(16,22,34,.22);border-top-color:var(--brand);
+    border:2px solid var(--line);border-top-color:var(--brand);
     animation:spin .7s linear infinite;
   }
   #searchSpin.on{display:block}
@@ -124,9 +155,9 @@
     padding:9px 10px;border-radius:10px;cursor:pointer;border-bottom:1px solid var(--line);
   }
   .search-item:last-child{border-bottom:0}
-  .search-item:hover,.search-item.active{background:rgba(43,108,255,.10)}
-  .search-title{font-weight:600;font-size:13.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .search-sub{font-size:11.5px;color:var(--sub);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .search-item:hover,.search-item.active{background:rgba(43,108,255,.12)}
+  .search-title{font-weight:600;font-size:13.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .search-sub{font-size:11.5px;color:var(--ink-soft);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .search-coord{font-size:10px;color:#9aa3b1;margin-top:2px;font-variant-numeric:tabular-nums;letter-spacing:.2px}
   .search-empty{padding:14px 10px;color:var(--sub);font-size:12.5px;text-align:center;line-height:1.5}
 
@@ -140,7 +171,7 @@
   .dock{display:flex;flex-direction:column;border-radius:var(--r);overflow:hidden;padding:0}
   .dock-btn{
     display:flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;border-radius:0;
-    color:#20293a;transition:background .15s,color .15s;position:relative;
+    color:var(--ink);transition:background .15s,color .15s;position:relative;
   }
   .dock-btn + .dock-btn{border-top:1px solid var(--line)}
   .dock-btn.icon-only{width:44px;height:44px;padding:0}
@@ -156,9 +187,9 @@
 
   #statBar{
     display:flex;align-items:center;gap:10px;padding:7px 13px;border-radius:11px;
-    font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums;
+    font-size:12px;color:var(--ink-soft);font-variant-numeric:tabular-nums;
   }
-  #statBar b{color:var(--text);font-weight:700;font-size:13px}
+  #statBar b{color:var(--ink);font-weight:700;font-size:13px}
   #statBar .dot{width:5px;height:5px;border-radius:50%;background:#34c759}
 
   #importMenu,#loadMenu{
@@ -212,6 +243,10 @@
   .pm.pm-out .pm-box{opacity:.5;border-color:#ffa94d}
   .pm.pm-out .pm-box::after{border-top-color:#ffa94d}
   .pm.pm-out.active .pm-box{opacity:1}   /* 当前播放高亮即使被标记 out 也恢复 */
+  /* 播放区间内已播过的缩略图：绿色边框 + 降低不透明度，与未播（蓝）区分 */
+  .pm.pm-played .pm-box{opacity:.5;border-color:#34c759}
+  .pm.pm-played .pm-box::after{border-top-color:#34c759}
+  .pm.pm-played.active .pm-box{opacity:1}
 
   /* ---------- 大图查看器 ---------- */
   #viewer{
@@ -293,12 +328,24 @@
   .field{margin-bottom:14px}
   .field label{display:block;font-size:12px;font-weight:600;color:var(--sub);margin-bottom:6px}
   .field input,.field select{
-    width:100%;height:40px;padding:0 11px;border-radius:10px;border:1px solid #dde2ea;
+    width:100%;min-width:0;height:40px;padding:0 11px;border-radius:10px;border:1px solid #dde2ea;
     font-size:13.5px;font-family:inherit;color:var(--text);background:#fbfcfe;outline:none;
   }
   .field input:focus,.field select:focus{border-color:var(--brand);background:#fff;box-shadow:0 0 0 3px rgba(43,108,255,.12)}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .row2>.field{min-width:0}   /* grid item 允许收缩到 1fr 等分，datetime-local 不再撑破右列 */
   .modal-actions{display:flex;gap:9px;margin-top:20px}
+  /* 复选框行（覆盖 .field label/input 的默认 block + width:100%） */
+  .field .cb-inline{
+    display:flex;align-items:flex-start;gap:8px;
+    font-weight:400;font-size:12.5px;color:var(--text);
+    cursor:pointer;line-height:1.5;margin-bottom:0;
+  }
+  .field .cb-inline input[type="checkbox"]{
+    width:16px;height:16px;margin-top:1px;flex:none;
+    accent-color:var(--brand);border:0;padding:0;
+  }
+  .field .cb-inline span{flex:1;min-width:0}
   .btn{flex:1;height:42px;border-radius:11px;font-size:14px;font-weight:600;transition:.15s}
   .btn.ghost{background:#f1f3f7;color:#39424f}
   .btn.ghost:hover{background:#e7eaf1}
@@ -331,11 +378,12 @@
   #playHud{
     position:absolute;z-index:620;left:50%;bottom:calc(24px + var(--safe-b));transform:translateX(-50%);
     display:flex;align-items:center;gap:13px;padding:9px 10px 9px 15px;border-radius:14px;min-width:min(430px,90vw);
+    background:var(--hud-bg);                  /* 标准浅玻璃 / 卫星深玻璃（跟随 --hud-bg 翻转） */
   }
-  #playHud .info{flex:1;min-width:0}
-  #playHud .nm{font-size:12.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  #playHud .tm{font-size:11px;color:var(--sub);margin-top:2px;font-variant-numeric:tabular-nums}
-  #playHud .pbar{height:3px;border-radius:2px;background:#e6eaf1;margin-top:7px;position:relative}
+  #playHud .info{flex:1;min-width:0;color:var(--ink)}
+  #playHud .nm{font-size:12.5px;font-weight:650;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #playHud .tm{font-size:11px;color:var(--ink-soft);margin-top:2px;font-variant-numeric:tabular-nums}
+  #playHud .pbar{height:3px;border-radius:2px;background:var(--pbar-bg);margin-top:7px;position:relative}
   #playHud .pbar i{display:block;height:100%;background:var(--brand);width:0;transition:width .25s linear}
   /* 进度条可拖动手柄：透明 range 叠加在视觉进度条上，只显示白色圆点 thumb */
   #hudSeek{
@@ -354,15 +402,49 @@
   }
   /* 速度选择器 */
   #playHud .hud-speed select{
-    height:32px;border-radius:8px;border:1px solid #e0e4ec;
-    background:#f1f3f7;color:#39424f;font-size:12px;font-weight:600;
+    height:32px;border-radius:8px;border:1px solid var(--line);
+    background:var(--btn-bg);color:var(--ink);font-size:12px;font-weight:600;
     padding:0 4px;cursor:pointer;outline:none;
   }
-  #playHud .hud-speed select:hover{background:#e5e9f0}
-  #playHud .hbtn{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:#f1f3f7;color:#39424f}
-  #playHud .hbtn:hover{background:#e5e9f0}
+  #playHud .hud-speed select:hover{background:var(--btn-bg-hover)}
+  #playHud .hbtn{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:var(--btn-bg);color:var(--ink)}
+  #playHud .hbtn:hover{background:var(--btn-bg-hover)}
   #playHud .hbtn.stop{background:rgba(229,72,77,.12);color:var(--danger)}
   #playHud .hbtn svg{width:16px;height:16px}
+
+  /* ---------- 播放时间刻度线（HUD 上方铺满横向宽度，但左右避开 dock 按钮） ---------- */
+  #hudTimeline{
+    position:absolute;z-index:590;            /* 低于 #playHud(620) 与左右图标(600)，避免视觉重叠 */
+    left:0;right:0;
+    /* bottom 由 JS 根据 #playHud 实际高度动态设置（位于播放条上方） */
+    /* left/right 由 positionTimelineAboveHud() 按 #panelLeft / #ctrlRight 实际占位动态计算 */
+    padding:0 14px;                           /* 内部留白，避免最左/最右年份标签被 dock 边缘裁切 */
+    height:34px;pointer-events:auto;
+    background:var(--hud-bg);                  /* 标准浅玻璃 / 卫星深玻璃（跟随 --hud-bg 翻转） */
+  }
+  #htLabels{position:absolute;left:0;right:0;top:4px;height:14px;pointer-events:none}
+  #htTicks{position:absolute;left:0;right:0;top:18px;height:14px;pointer-events:none}
+  .ht-label{
+    position:absolute;top:0;font-size:10px;font-weight:600;
+    color:var(--ink);white-space:nowrap;
+    text-shadow:0 0 3px var(--hud-bg),0 0 1px var(--hud-bg);   /* 阴影与玻璃背板同色，无论明暗底图都能与文字互补 */
+    transform:translateX(-50%);
+    font-variant-numeric:tabular-nums;
+  }
+  .ht-tick{
+    position:absolute;bottom:0;width:1px;
+    background:var(--ink);
+    box-shadow:0 0 1px var(--hud-bg);
+    opacity:.78;
+  }
+  .ht-tick.year{height:12px;opacity:1}
+  .ht-tick.month{height:6px}
+  #htPlayhead{
+    position:absolute;top:0;bottom:0;width:2px;
+    background:var(--brand);left:0;pointer-events:none;
+    box-shadow:0 0 4px rgba(43,108,255,.45);
+  }
+  #htHit{position:absolute;inset:0;cursor:pointer}
 
   /* ---------- DB 文件管理弹窗 ---------- */
   #dbManageModal .modal{max-width:min(960px,96vw);padding:18px 18px 16px}
@@ -482,7 +564,17 @@
   body.is-mobile .dock-btn svg{width:21px;height:21px}
   body.is-mobile #statBar{align-self:flex-start;margin-bottom:0}
   body.is-mobile #ctrlRight{bottom:calc(24px + var(--safe-b))}
-  body.is-mobile #playHud{bottom:calc(96px + var(--safe-b));min-width:0;width:calc(100% - 20px)}
+  /* 手机模式：播放条坐在 dock 横向之间（bottom 与 dock 同行，left/right 让出两侧 dock 宽度），
+     横向不与 dock/ctrlRight 重叠，纵向同行但视觉上呈 [dock｜播放条｜缩放] 一字排列 */
+  body.is-mobile #playHud{
+    bottom:calc(24px + var(--safe-b));
+    min-width:0;width:auto;
+    left:calc(72px + var(--safe-l));right:calc(72px + var(--safe-r));
+    transform:none;
+    gap:8px;padding:6px 8px 6px 12px;
+  }
+  body.is-mobile #playHud .hbtn{width:32px;height:32px;border-radius:8px}
+  body.is-mobile #playHud .hud-speed select{height:28px;font-size:11px}
   body.is-mobile #importMenu{left:10px;right:10px;bottom:calc(90px + var(--safe-b));min-width:0}
   body.is-mobile #viewer .frame{max-width:88vw;max-height:62vh}
   body.is-mobile #viewerImg{max-height:calc(62vh - 12px)}
@@ -620,6 +712,14 @@
   </button>
 </div>
 
+<!-- 播放时间刻度线（HUD 下方铺满横向宽度，背景透明） -->
+<div id="hudTimeline" class="hidden">
+  <div class="ht-labels" id="htLabels"></div>
+  <div class="ht-ticks" id="htTicks"></div>
+  <div class="ht-playhead" id="htPlayhead"></div>
+  <div class="ht-hit" id="htHit" title="拖动跳转到对应时间"></div>
+</div>
+
 <!-- 进度 -->
 <div id="progress" class="glass hidden">
   <div class="pt"><span id="progTitle">正在处理</span><span id="progCount"></span></div>
@@ -724,6 +824,14 @@
         <option value="4">4×</option>
         <option value="8">8× 极速</option>
       </select>
+    </div>
+    <div class="field">
+      <label>缩略图</label>
+      <label class="cb-inline"><input type="checkbox" id="playThumb" checked><span>播放时在点位上叠加缩略图（关闭则按轨迹点闪动播放，已播/未播可区分）</span></label>
+    </div>
+    <div class="field">
+      <label>区间外点位</label>
+      <label class="cb-inline"><input type="checkbox" id="playOutRange"><span>显示播放区间外的照片点位（默认隐藏，勾选则以橙色降级显示）</span></label>
     </div>
     <div class="hintbox" id="playHint"></div>
     <div class="modal-actions">

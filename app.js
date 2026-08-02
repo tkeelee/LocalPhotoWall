@@ -34,7 +34,7 @@
   var saveDirHandle = null;     // 保存目录句柄（File System Access API）
 
   var viewerOpen = false, viewerUrl = null, viewerOwnerEl = null;
-  var player = { running: false, paused: false, idx: 0, list: [], listSet: null, timer: null, speed: 1, activeEl: null, activeMk: null };
+  var player = { running: false, paused: false, idx: 0, list: [], listSet: null, timer: null, speed: 1, activeEl: null, activeMk: null, showThumb: true, showOutRange: false, playedHashes: null };
 
   /* 渲染层：高缩放用 thumbLayer(divIcon 缩略图 + 视口裁剪)，低缩放用 dotLayer(Canvas 圆点) */
   var thumbLayer = null, dotLayer = null, dotRenderer = null;
@@ -462,6 +462,7 @@
 
   function toggleLayer() {
     isSatellite = !isSatellite;
+    document.body.classList.toggle('satellite', isSatellite);   // 同步浮层主题：图标/刻度线/播放条/比例尺随底图翻转
     applyBasemap();
     $('btnLayer').classList.toggle('on', isSatellite);
     toast(isSatellite ? '已切换到卫星影像' : '已切换到标准地图');
@@ -1128,10 +1129,16 @@
   }
 
   /* 核心渲染调度：高缩放用缩略图 + 视口裁剪，低缩放用 Canvas 圆点 */
+  /* 播放中且选择隐藏区间外点位时，判断某照片是否应被隐藏 */
+  function isHiddenDuringPlayback(p) {
+    return player.running && !player.showOutRange && player.listSet && !player.listSet[p.hash];
+  }
+
   function renderVisible() {
     if (!map || !thumbLayer) return;
     var z = map.getZoom();
-    var wantThumb = z >= ZOOM_THUMB;
+    // 关闭缩略图播放时，强制走 dot 模式（视感：轨迹点闪动），不再渲染缩略图 marker
+    var wantThumb = z >= ZOOM_THUMB && !(player.running && !player.showThumb);
 
     if (wantThumb) {
       /* —— 缩略图模式 —— */
@@ -1142,22 +1149,23 @@
 
       var bounds = map.getBounds().pad(VIEWPORT_PAD);
 
-      // 先移除视口外的（跳过播放中当前照片）
+      // 先移除视口外的 + 区间外隐藏的（跳过播放中当前照片）
       for (var i = 0; i < photos.length; i++) {
         var q = photos[i];
         if (!q.marker) continue;
         if (q.el === player.activeEl) continue;   // 播放中保留
-        if (!bounds.contains([q.gLat, q.gLng])) {
+        if (!bounds.contains([q.gLat, q.gLng]) || isHiddenDuringPlayback(q)) {
           thumbLayer.removeLayer(q.marker);
           disposeThumbMarker(q);
         }
       }
 
-      // 收集需要新增的
+      // 收集需要新增的（跳过区间外隐藏的）
       var toAdd = [];
       for (var j = 0; j < photos.length; j++) {
         var p = photos[j];
         if (p.marker) continue;
+        if (isHiddenDuringPlayback(p)) continue;
         if (bounds.contains([p.gLat, p.gLng])) toAdd.push(p);
       }
       // 分批创建，避免单帧卡顿
@@ -1180,9 +1188,13 @@
         thumbLayer.clearLayers();
         for (var m = 0; m < photos.length; m++) disposeThumbMarker(photos[m]);
       }
-      // 始终为缺失的照片创建圆点并加入 dotLayer（支持增量加载）
+      // 为缺失的照片创建圆点并加入 dotLayer；区间外隐藏的跳过（已加入的移除）
       for (var n = 0; n < photos.length; n++) {
         var pp = photos[n];
+        if (isHiddenDuringPlayback(pp)) {
+          if (pp.dot && dotLayer.hasLayer(pp.dot)) dotLayer.removeLayer(pp.dot);
+          continue;
+        }
         if (!pp.dot) { createDotMarker(pp); dotLayer.addLayer(pp.dot); }
         else if (!dotLayer.hasLayer(pp.dot)) dotLayer.addLayer(pp.dot);
       }
@@ -1216,7 +1228,8 @@
 
   /* dot 模式下为播放当前照片同步临时缩略图 */
   function syncPlayerThumb() {
-    if (!player.running || player.idx >= player.list.length) { clearPlayerThumb(); return; }
+    // 关闭缩略图模式时不创建临时缩略图 marker（避免 dot 模式下仍闪缩略图）
+    if (!player.running || !player.showThumb || player.idx >= player.list.length) { clearPlayerThumb(); return; }
     var p = player.list[player.idx];
     if (playerThumb && playerThumb.__p === p) return;
     clearPlayerThumb();
@@ -1597,16 +1610,172 @@
     player.listSet = Object.create(null);
     for (var i = 0; i < list.length; i++) player.listSet[list[i].hash] = true;
     player.speed = speed;
+    player.showThumb = $('playThumb').checked;          // 是否在点位上叠加缩略图
+    player.showOutRange = $('playOutRange').checked;     // 是否显示区间外点位（默认隐藏）
+    player.playedHashes = Object.create(null);           // 记录已播过的 hash（用于已播/未播视觉区分）
+    player.lastIdx = -1;                                   // 用于 tickPlay 判断是顺序前进还是跳转
     applyPlayStyles();   // 非播放点位降级显示
+    renderVisible();    // 立即按 showThumb 切换渲染模式（关闭缩略图时立即清掉既有缩略图 marker，避免首帧残留）
     show($('playHud'));
     setHudIcon(true);
     // 初始化 HUD 控件状态
     $('hudSpeed').value = String(speed);
     $('hudSeek').value = 0;
+    var hasTimeline = renderTimeline();   // 构建播放区间时间刻度线（边缘场景返回 false）
+    updateTimelinePlayhead(0);
+    if (hasTimeline) {
+      positionTimelineAboveHud();        // 刻度条位于播放条上方，随 #playHud 高度自适应
+      show($('hudTimeline'));
+    } else {
+      hide($('hudTimeline'));
+    }
     tickPlay();
   }
 
   function interval() { return Math.max(140, 1300 / player.speed); }
+
+  /* 播放时间刻度线：根据 player.list 起止时间构建年/月刻度，写入 DOM。
+     - 起止时间相同或列表 ≤1 → 返回 false，调用方应隐藏时间刻度线
+     - 始终同时绘制年刻度与月刻度（按用户要求「增加月刻度」） */
+  function renderTimeline() {
+    var labels = $('htLabels');
+    var ticks = $('htTicks');
+    if (!labels || !ticks) return false;
+    labels.innerHTML = '';
+    ticks.innerHTML = '';
+    var list = player.list;
+    if (!list || list.length < 2) return false;
+    var startTs = list[0].takenTs;
+    var endTs = list[list.length - 1].takenTs;
+    if (startTs == null || endTs == null || endTs <= startTs) return false;
+
+    var spanMs = endTs - startTs;
+    var spanDays = spanMs / 86400000;
+    var showMonthLabels = spanDays <= 180;
+
+    // 起点 / 终点日期（本地时区）
+    var sd = new Date(startTs);
+    var ed = new Date(endTs);
+    var y0 = sd.getFullYear(), m0 = sd.getMonth();
+    var y1 = ed.getFullYear(), m1 = ed.getMonth();
+
+    function pos(ts) {
+      var p = (ts - startTs) / spanMs * 100;
+      if (p < 0) p = 0; if (p > 100) p = 100;
+      return p;
+    }
+
+    // 月刻度：从 startTs 所在月起逐月推进到 endTs 所在月
+    var monthTicks = [];
+    var yearLabels = [];
+    // 把起点对齐到本月 1 日 00:00
+    var cursor = new Date(y0, m0, 1).getTime();
+    // 终点对齐到下月 1 日（不包含），确保覆盖
+    var endCursor = new Date(y1, m1 + 1, 1).getTime();
+    while (cursor < endCursor) {
+      var inRange = cursor >= startTs && cursor <= endTs;
+      if (inRange) {
+        var isYearStart = (new Date(cursor).getMonth() === 0);
+        monthTicks.push({ ts: cursor, x: pos(cursor), isYearStart: isYearStart });
+        if (isYearStart) yearLabels.push({ ts: cursor, x: pos(cursor), year: new Date(cursor).getFullYear(), text: String(new Date(cursor).getFullYear()) });
+      }
+      // 推进到下个月 1 日
+      var nd = new Date(cursor);
+      nd.setMonth(nd.getMonth() + 1);
+      cursor = nd.getTime();
+    }
+
+    // 始终绘制月刻度（按用户要求增加月刻度，不再按区间长度抑制）
+    monthTicks.forEach(function (t) {
+      var el = document.createElement('div');
+      el.className = 'ht-tick month';
+      el.style.left = t.x + '%';
+      ticks.appendChild(el);
+    });
+    // 短区间：在月份位置加 "X月" 标签
+    if (showMonthLabels) {
+      monthTicks.forEach(function (t) {
+        var mon = new Date(t.ts).getMonth() + 1;
+        var lbl = document.createElement('div');
+        lbl.className = 'ht-label';
+        lbl.textContent = mon + '月';
+        lbl.style.left = t.x + '%';
+        labels.appendChild(lbl);
+      });
+    }
+
+    // 年份刻度与标签
+    // 先强制标注起止两端年份，保证刻度线左/右边缘与真实播放区间（如 2022→2026）对齐，
+    // 即使起点的 1月1日 不在区间内，两端也能看到年份
+    var labeledYears = {};
+    function addYearTickLabel(year, x) {
+      var el = document.createElement('div');
+      el.className = 'ht-tick year';
+      el.style.left = x + '%';
+      ticks.appendChild(el);
+      var lbl = document.createElement('div');
+      lbl.className = 'ht-label';
+      lbl.textContent = String(year);
+      lbl.style.left = x + '%';
+      labels.appendChild(lbl);
+    }
+    addYearTickLabel(y0, 0);      // 起始年（最左边缘）
+    addYearTickLabel(y1, 100);    // 结束年（最右边缘）
+    labeledYears[y0] = true;
+    labeledYears[y1] = true;
+
+    // 区间内其余年份（每年 1月1日 落在范围内）标注，跳过已标过的起止年
+    yearLabels.forEach(function (t) {
+      if (labeledYears[t.year]) return;
+      labeledYears[t.year] = true;
+      addYearTickLabel(t.year, t.x);
+    });
+
+    // 是否实际渲染出内容（无年/月边界可见时仍至少有 2 个 edge 刻度）
+    return ticks.childNodes.length > 0;
+  }
+
+  /* 把播放时间刻度线定位到播放条上方：测量 #playHud 实际渲染位置 + 6px 间隙 */
+  function positionTimelineAboveHud() {
+    var hud = $('playHud');
+    var tl = $('hudTimeline');
+    if (!hud || !tl) return;
+    var hudRect = hud.getBoundingClientRect();
+    var viewportH = window.innerHeight;
+    var gap = 6;
+    tl.style.bottom = (viewportH - hudRect.top + gap) + 'px';
+
+    // 刻度条左右缩进到两侧 dock 按钮列之外，避免覆盖左下操作区 / 右下缩放控件
+    // 注意：测量 #panelLeft/.dock 与 #ctrlRight/.ctrl-group，不要测整个容器 —— 容器还含 statBar/scaleBar
+    // 等更宽子元素，会让左右缩进不对称；刻度线 y 位置与 statBar（顶）/scaleBar（底）都不重叠
+    var sideGap = 12;
+    var vw = window.innerWidth;
+    function panelInset(panel, fromRight) {
+      if (!panel) return 0;
+      // offsetParent 为 null 表示被 display:none 等隐藏，跳过避免测量到 0 产生负宽度
+      if (panel.offsetParent === null) return 0;
+      var rect = panel.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return 0;
+      return fromRight ? (vw - rect.left) + sideGap : rect.right + sideGap;
+    }
+    var leftDock = document.querySelector('#panelLeft .dock') || $('panelLeft');
+    var rightDock = document.querySelector('#ctrlRight .ctrl-group') || $('ctrlRight');
+    tl.style.left = panelInset(leftDock, false) + 'px';
+    tl.style.right = panelInset(rightDock, true) + 'px';
+  }
+
+  /* 当前位置游标同步：与 #hudBar 一致按索引比例定位，保证与进度条互相同步 */
+  function updateTimelinePlayhead(idx) {
+    var ph = $('htPlayhead');
+    var list = player.list;
+    if (!ph || !list || list.length < 2) {
+      if (ph) ph.style.left = '0%';
+      return;
+    }
+    var p = idx / Math.max(1, list.length - 1) * 100;
+    if (p < 0) p = 0; if (p > 100) p = 100;
+    ph.style.left = p + '%';
+  }
 
   function tickPlay() {
     if (!player.running) return;
@@ -1625,18 +1794,49 @@
     // 释放 dot 模式下上一张的临时缩略图
     if (prev) releasePlayerMarker(prev);
 
-    // 当前：确保有 marker（thumb 模式视口外被裁剪 / dot 模式无 el 时会自动创建），再高亮
-    ensurePlayerMarker(p);
-    if (p.el) {
-      player.activeEl = p.el;
-      player.activeMk = p.marker;
-      p.el.classList.add('active');
-      p.el.style.setProperty('--s', currentScale() * 2);
-      if (p.marker) p.marker.setZIndexOffset(2000);
-      p.el.classList.remove('shake');
-      void p.el.offsetWidth;   // 重新触发抖动动画
-      p.el.classList.add('shake');
+    // 同步「已播过」集合：顺序前进只标记 prev；跳转（进度条拖动 / 时间刻度拖动）则整体重建
+    if (player.playedHashes) {
+      if (player.idx === player.lastIdx + 1) {
+        // 顺序前进：仅把上一张标记为已播
+        if (prev && !player.playedHashes[prev.hash]) {
+          player.playedHashes[prev.hash] = true;
+          if (prev.dot) prev.dot.setStyle({ fillColor: '#34c759', radius: 4 });
+          if (prev.el) prev.el.classList.add('pm-played');
+        }
+      } else {
+        // 跳转前进 / 回退：按当前 idx 重建已播集合并重新染色所有点位
+        player.playedHashes = Object.create(null);
+        for (var i = 0; i < player.idx; i++) {
+          player.playedHashes[player.list[i].hash] = true;
+        }
+        applyPlayStyles();
+      }
     }
+    player.lastIdx = player.idx;
+
+    if (player.showThumb) {
+      // —— 带缩略图模式：原有行为 ——
+      // 当前：确保有 marker（thumb 模式视口外被裁剪 / dot 模式无 el 时会自动创建），再高亮
+      ensurePlayerMarker(p);
+      if (p.el) {
+        player.activeEl = p.el;
+        player.activeMk = p.marker;
+        p.el.classList.add('active');
+        p.el.style.setProperty('--s', currentScale() * 2);
+        if (p.marker) p.marker.setZIndexOffset(2000);
+        p.el.classList.remove('shake');
+        void p.el.offsetWidth;   // 重新触发抖动动画
+        p.el.classList.add('shake');
+      }
+    } else {
+      // —— 不带缩略图模式：只高亮 dot（放大 + 亮橙色），不创建缩略图 marker ——
+      player.activeEl = p.el || null;
+      player.activeMk = null;   // dot（circleMarker）无 setZIndexOffset，不设 activeMk 避免 cleanup 报错
+      if (p.dot) {
+        p.dot.setStyle({ fillColor: '#ff6b35', radius: 8 });
+      }
+    }
+
     // 只平移视野让点位居中，绝不改缩放级别
     map.panTo([p.gLat, p.gLng], { animate: true, duration: Math.min(0.7, interval() / 1000 * 0.65) });
 
@@ -1646,6 +1846,7 @@
     $('hudBar').style.width = ((player.idx + 1) / player.list.length * 100) + '%';
     // 同步进度条手柄位置（程序化设置 value 不触发 input 事件，安全）
     $('hudSeek').value = Math.round(player.idx / Math.max(1, player.list.length - 1) * 100);
+    updateTimelinePlayhead(player.idx);
 
     player.timer = setTimeout(function () {
       if (!player.running || player.paused) return;
@@ -1685,32 +1886,48 @@
     player.activeMk = null;
     player.list = [];
     player.listSet = null;   // 清空播放集合，恢复所有点位为蓝色
-    clearPlayStyles();       // 恢复所有点位为默认蓝色
+    player.playedHashes = null;
+    player.lastIdx = -1;
+    clearPlayStyles();       // 恢复所有点位为默认蓝色（含半径复位）
     updateAllScales();
+    renderVisible();         // 关闭缩略图模式下强制走 dot 模式，停止后按缩放级别恢复
     hide($('playHud'));
+    hide($('hudTimeline'));  // 隐藏播放时间刻度线
     if (finished) toast('播放结束，共 ' + total + ' 个点位');
   }
 
   /* 播放起止时批量更新点位样式：本次播放保持蓝色，非本次降为橙色 */
+  /* 播放起止时批量更新点位样式：本次播放保持蓝色，非本次降为橙色；
+     若 showThumb=false 还需区分「已播过 / 未播过」：已播变灰，未播保持蓝 */
   function applyPlayStyles() {
     if (!player.listSet) return;
     for (var i = 0; i < photos.length; i++) {
       var p = photos[i];
       var inPlay = !!player.listSet[p.hash];
+      var isPlayed = !!(player.playedHashes && player.playedHashes[p.hash]);
+      // 区间外且选择隐藏时，跳过样式（renderVisible 已将其从图层移除）
+      if (!inPlay && !player.showOutRange) continue;
       if (p.dot) {
-        p.dot.setStyle({ fillColor: inPlay ? '#2b6cff' : '#ff9500' });
+        var color;
+        if (!inPlay) color = '#ff9500';            // 区间外：橙（仅 showOutRange=true 时可见）
+        else if (isPlayed) color = '#34c759';        // 区间内已播：绿
+        else color = '#2b6cff';                       // 区间内未播：蓝
+        p.dot.setStyle({ fillColor: color, radius: 4 });
       }
       if (p.el) {
         if (inPlay) p.el.classList.remove('pm-out');
         else p.el.classList.add('pm-out');
+        // 已播缩略图降不透明度（仅在缩略图模式下显示，关闭缩略图时也保留标记便于切回时呈现）
+        if (inPlay && isPlayed) p.el.classList.add('pm-played');
+        else p.el.classList.remove('pm-played');
       }
     }
   }
   function clearPlayStyles() {
     for (var i = 0; i < photos.length; i++) {
       var p = photos[i];
-      if (p.dot) p.dot.setStyle({ fillColor: '#2b6cff' });
-      if (p.el) p.el.classList.remove('pm-out');
+      if (p.dot) p.dot.setStyle({ fillColor: '#2b6cff', radius: 4 });   // 复位半径
+      if (p.el) p.el.classList.remove('pm-out', 'pm-played');
     }
   }
 
@@ -2770,6 +2987,7 @@
         $('hudTime').textContent = (p.approxTime ? '≈ ' : '') + fmtTime(p.takenTs) +
           '　·　' + (idx + 1) + ' / ' + player.list.length;
         $('hudBar').style.width = ((idx + 1) / player.list.length * 100) + '%';
+        updateTimelinePlayhead(idx);
       }
     });
     $('hudSeek').addEventListener('change', function () {
@@ -2782,8 +3000,72 @@
       if (player.activeMk && player.activeMk !== playerThumb) player.activeMk.setZIndexOffset(0);
       if (cur) releasePlayerMarker(cur);
       player.idx = idx;
+      updateTimelinePlayhead(idx);
       tickPlay();   // 重新高亮目标位置并按当前速度/暂停状态调度
     });
+
+    /* 播放时间刻度线拖动跳转：pointerdown 记录起点，pointermove 实时预览，pointerup 跳转
+       与 #hudSeek 的 input/change 行为等价，确保进度条 / 游标 / 播放状态三者同步 */
+    (function () {
+      var hit = $('htHit');
+      if (!hit) return;
+      var dragging = false;
+
+      function idxFromEvent(e) {
+        var rect = hit.getBoundingClientRect();
+        var x = (e.clientX != null ? e.clientX : (e.touches && e.touches[0] ? e.touches[0].clientX : 0)) - rect.left;
+        if (rect.width <= 0) return 0;
+        var ratio = x / rect.width;
+        if (ratio < 0) ratio = 0; if (ratio > 1) ratio = 1;
+        var max = player.list.length - 1;
+        return Math.max(0, Math.min(Math.round(ratio * max), max));
+      }
+
+      function previewAt(idx) {
+        var p = player.list[idx];
+        if (!p) return;
+        clearTimeout(player.timer);
+        $('hudName').textContent = p.name;
+        $('hudTime').textContent = (p.approxTime ? '≈ ' : '') + fmtTime(p.takenTs) +
+          '　·　' + (idx + 1) + ' / ' + player.list.length;
+        $('hudBar').style.width = ((idx + 1) / player.list.length * 100) + '%';
+        $('hudSeek').value = Math.round(idx / Math.max(1, player.list.length - 1) * 100);
+        updateTimelinePlayhead(idx);
+      }
+
+      function commitAt(idx) {
+        var cur = player.list[player.idx];
+        if (player.activeEl && cur && cur.el) cur.el.classList.remove('active', 'shake');
+        if (player.activeMk && player.activeMk !== playerThumb) player.activeMk.setZIndexOffset(0);
+        if (cur) releasePlayerMarker(cur);
+        player.idx = idx;
+        updateTimelinePlayhead(idx);
+        tickPlay();
+      }
+
+      hit.addEventListener('pointerdown', function (e) {
+        if (!player.running) return;
+        dragging = true;
+        hit.setPointerCapture && hit.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        previewAt(idxFromEvent(e));
+      });
+      hit.addEventListener('pointermove', function (e) {
+        if (!player.running || !dragging) return;
+        previewAt(idxFromEvent(e));
+      });
+      function endDrag(e) {
+        if (!dragging) return;
+        dragging = false;
+        try { hit.releasePointerCapture && hit.releasePointerCapture(e.pointerId); } catch (_) {}
+        if (player.running) commitAt(idxFromEvent(e));
+      }
+      hit.addEventListener('pointerup', endDrag);
+      hit.addEventListener('pointercancel', endDrag);
+    })();
+
+    // 窗口尺寸变化时重新定位播放时间刻度线（位于 #playHud 上方）
+    window.addEventListener('resize', positionTimelineAboveHud);
 
     // 【离线下载已禁用】以下 UI 接线注释保留，代码不启用
     // $('btnOffline').addEventListener('click', openOfflineModal);
